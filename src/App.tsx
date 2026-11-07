@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { 
-  Truck, Check, Lock, Copy, Plus, Upload, Search, Calendar, 
+  Truck, Check, Lock, Copy, Plus, Upload, Search, 
   LogOut, Settings, Database, X, User, AlertCircle
 } from 'lucide-react';
 import { supabase, isSupabaseConfigured, WORKERS, WORKER_PASSWORD } from './supabase';
@@ -51,7 +51,7 @@ export function App() {
     setToastMsg(msg);
     setTimeout(() => {
       setToastMsg((cur) => (cur === msg ? '' : cur));
-    }, 3000);
+    }, 2500);
   };
 
   // Setup broadcast channel for offline / local sync between tabs
@@ -103,7 +103,7 @@ export function App() {
         setTrucks(data || []);
       } catch (err: any) {
         console.error('Supabase fetch error:', err);
-        showToast('Supabase sync error: ' + (err.message || 'Check credentials'));
+        showToast('Sync error: ' + (err.message || 'Check credentials'));
       }
     } else {
       // Local storage fallback
@@ -115,7 +115,7 @@ export function App() {
           setTrucks([]);
         }
       } else {
-        // Initial sample trucks if empty
+        // Initial sample trucks
         const initialSamples: TruckItem[] = [
           {
             id: 'demo-1',
@@ -246,7 +246,7 @@ export function App() {
         gate1_at: new Date().toISOString(),
         gate1_by: currentWorker,
       };
-      showToast(`${t.plate}: Gate 1 ticked by ${currentWorker}`);
+      showToast(`${t.plate}: Gate 1 ticked (${currentWorker})`);
     }
 
     setTrucks((prev) => prev.map((item) => (item.id === t.id ? updated : item)));
@@ -259,7 +259,7 @@ export function App() {
     
     // Check gate 1 rule
     if (!t.gate1_at) {
-      showToast('⚠️ Must tick Gate 1 first before Gate 2!');
+      showToast('⚠️ Tick Gate 1 first!');
       return;
     }
 
@@ -279,7 +279,7 @@ export function App() {
         gate2_at: new Date().toISOString(),
         gate2_by: currentWorker,
       };
-      showToast(`🚚 ${t.plate}: LOADED! (by ${currentWorker})`);
+      showToast(`🚚 ${t.plate}: LOADED! (${currentWorker})`);
     }
 
     setTrucks((prev) => prev.map((item) => (item.id === t.id ? updated : item)));
@@ -299,7 +299,7 @@ export function App() {
     e.preventDefault();
     const cleanPlate = newPlate.trim().toUpperCase().replace(/[^0-9A-Z]/g, '');
     if (!cleanPlate) {
-      showToast('Please enter a valid plate number');
+      showToast('Enter valid plate number');
       return;
     }
 
@@ -308,7 +308,7 @@ export function App() {
       (t) => t.plate.toUpperCase() === cleanPlate && t.country === newCountry
     );
     if (exists) {
-      showToast(`⚠️ Truck ${cleanPlate} (${newCountry}) is already in today's list!`);
+      showToast(`⚠️ Truck ${cleanPlate} already in list!`);
       return;
     }
 
@@ -333,7 +333,7 @@ export function App() {
           setTrucks((prev) => [...prev, data[0]]);
         }
       } catch (err: any) {
-        showToast('Error adding truck: ' + err.message);
+        showToast('Error: ' + err.message);
         return;
       }
     } else {
@@ -346,7 +346,7 @@ export function App() {
     setNewPlate('');
     setNewDriver('');
     setShowAdd(false);
-    showToast(`✓ Added ${cleanPlate} (${newCountry})`);
+    showToast(`✓ Added ${cleanPlate}`);
   };
 
   // Delete truck
@@ -379,19 +379,16 @@ export function App() {
 
   // Format and copy day report
   const copyDayReport = () => {
-    // Only trucks that passed Gate 2 (LOADED)
     const loadedTrucks = trucks.filter((t) => Boolean(t.gate2_at));
 
     if (loadedTrucks.length === 0) {
-      showToast('No loaded trucks (Gate 2) yet to report!');
+      showToast('No loaded trucks (Gate 2) yet!');
       return;
     }
 
-    // Convert date YYYY-MM-DD to DD-MM-YYYY
     const [year, month, day] = date.split('-');
     const formattedDate = `${day}-${month}-${year}`;
 
-    // Format each truck: "3187YB.  OMN-07PC"
     const truckLines = loadedTrucks.map((t) => {
       const pcsNum = t.pcs || 0;
       const paddedPcs = pcsNum < 10 ? `0${pcsNum}` : `${pcsNum}`;
@@ -402,7 +399,7 @@ export function App() {
 
     if (navigator.clipboard && navigator.clipboard.writeText) {
       navigator.clipboard.writeText(reportText).then(() => {
-        showToast(`📋 Copied ${loadedTrucks.length} loaded trucks report!`);
+        showToast(`📋 Copied ${loadedTrucks.length} trucks report!`);
       }).catch(() => {
         fallbackCopy(reportText, loadedTrucks.length);
       });
@@ -418,14 +415,14 @@ export function App() {
     el.select();
     try {
       document.execCommand('copy');
-      showToast(`📋 Copied ${count} loaded trucks report!`);
+      showToast(`📋 Copied ${count} trucks report!`);
     } catch {
-      showToast('Copy blocked by browser permissions');
+      showToast('Copy blocked by browser');
     }
     el.remove();
   };
 
-  // Parse text or photo lines
+  // Parse text lines from image/doc
   const parseAndAddRows = (rawText: string) => {
     const lines = rawText.split('\n');
     let addedCount = 0;
@@ -435,16 +432,13 @@ export function App() {
       const trimmed = line.trim();
       if (!trimmed || trimmed.toLowerCase().includes('gate') || trimmed.toLowerCase().includes('kizad')) continue;
 
-      // Detect OMN or DXB
       const isDxb = /DXB|DUBAI/i.test(trimmed);
       const country: 'OMN' | 'DXB' = isDxb ? 'DXB' : 'OMN';
 
-      // Extract plate number (alphanumeric like 3187YB or 39263 or 81852)
       const cleanMatch = trimmed.match(/[0-9]{3,6}[A-Z]{0,3}|[A-Z]{1,3}[0-9]{3,6}/i);
       if (!cleanMatch) continue;
       const plate = cleanMatch[0].toUpperCase();
 
-      // Skip duplicate
       const already = newTrucksList.some(
         (t) => t.plate.toUpperCase() === plate && t.country === country
       );
@@ -468,13 +462,13 @@ export function App() {
       setTrucks(newTrucksList);
       localStorage.setItem(`gt_trucks_${date}`, JSON.stringify(newTrucksList));
       broadcastRef.current?.postMessage({ type: 'TRUCKS_UPDATED' });
-      showToast(`Added ${addedCount} trucks from list!`);
+      showToast(`Added ${addedCount} trucks!`);
     } else {
-      showToast('No new trucks found in text or duplicates skipped.');
+      showToast('No new trucks found in text.');
     }
   };
 
-  // Image Upload handler (with Gemini or smart OCR parser)
+  // Image Upload handler
   const handlePhotoUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
@@ -520,19 +514,17 @@ export function App() {
           if (generatedText) {
             parseAndAddRows(generatedText);
           } else {
-            showToast('Could not extract text from photo');
+            showToast('Could not extract text');
           }
           setParsingImage(false);
         };
       } catch (err: any) {
-        showToast('Vision API Error: ' + err.message);
+        showToast('Vision error: ' + err.message);
         setParsingImage(false);
       }
     } else {
-      // Prompt user or open modal
       setShowUploadModal(true);
       setParsingImage(false);
-      showToast('Enter Gemini Key in Settings or paste list text');
     }
   };
 
@@ -542,8 +534,8 @@ export function App() {
     localStorage.setItem('gt_supabase_anon_key', sbKey.trim());
     localStorage.setItem('gt_gemini_key', geminiKey.trim());
     setShowSettings(false);
-    showToast('Settings saved! Reloading…');
-    setTimeout(() => window.location.reload(), 500);
+    showToast('Saved! Reloading…');
+    setTimeout(() => window.location.reload(), 400);
   };
 
   // Filter trucks by search
@@ -564,71 +556,82 @@ export function App() {
   const sLoaded = trucks.filter((t) => Boolean(t.gate2_at)).length;
 
   // -------------------------------------------------------------------------
-  // LOGIN SCREEN (If not logged in)
+  // LOGIN SCREEN (White Aesthetic)
   // -------------------------------------------------------------------------
   if (!currentWorker) {
     return (
-      <div style={{ padding: '24px 20px', minHeight: '100dvh', display: 'flex', flexDirection: 'column', justifyContent: 'center' }}>
-        <div style={{ textAlign: 'center', marginBottom: '32px' }}>
+      <div style={{ 
+        height: '100dvh', width: '100%', 
+        display: 'flex', flexDirection: 'column', justifyContent: 'center', 
+        padding: '20px', background: '#f5f6f9' 
+      }}>
+        <div style={{ textAlign: 'center', marginBottom: '24px' }}>
           <div style={{ 
             display: 'inline-flex', alignItems: 'center', justifyContent: 'center', 
-            width: '64px', height: '64px', borderRadius: '20px', 
-            background: 'var(--surface-raised)', border: '1px solid var(--surface-border)', 
-            marginBottom: '16px' 
+            width: '52px', height: '52px', borderRadius: '16px', 
+            background: '#ffffff', border: '1px solid #e5e7eb', 
+            boxShadow: '0 2px 8px rgba(0,0,0,0.04)',
+            marginBottom: '12px' 
           }}>
-            <Truck size={32} color="var(--text-main)" />
+            <Truck size={26} color="#111827" />
           </div>
-          <h1 style={{ fontSize: '24px', fontWeight: 800, letterSpacing: '-0.5px' }}>Gate Tracker</h1>
-          <p style={{ color: 'var(--text-muted)', fontSize: '13px', marginTop: '4px' }}>KIZAD · CC · Worker Access</p>
+          <h1 style={{ fontSize: '20px', fontWeight: 800, color: '#111827', letterSpacing: '-0.4px' }}>Gate Tracker</h1>
+          <p style={{ color: '#6b7280', fontSize: '12px', marginTop: '2px', fontWeight: 500 }}>KIZAD · CC · Worker Access</p>
         </div>
 
-        <div style={{ background: 'var(--surface)', borderRadius: '24px', padding: '24px', border: '1px solid var(--surface-border)' }}>
-          <h2 style={{ fontSize: '16px', fontWeight: 700, marginBottom: '16px', display: 'flex', alignItems: 'center', gap: '8px' }}>
-            <User size={18} /> Select Worker ID
-          </h2>
+        <div style={{ 
+          background: '#ffffff', borderRadius: '20px', padding: '20px', 
+          border: '1px solid #e5e7eb', boxShadow: '0 4px 16px rgba(0,0,0,0.03)' 
+        }}>
+          <div style={{ fontSize: '12px', fontWeight: 700, color: '#374151', marginBottom: '12px', display: 'flex', alignItems: 'center', gap: '6px' }}>
+            <User size={15} /> Select Your Worker ID
+          </div>
 
-          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: '8px', marginBottom: '20px' }}>
-            {WORKERS.map((w) => (
-              <button
-                key={w}
-                type="button"
-                onClick={() => setLoginWorker(w)}
-                style={{
-                  padding: '14px 6px',
-                  borderRadius: '14px',
-                  border: '1px solid',
-                  borderColor: loginWorker === w ? 'var(--text-main)' : 'var(--surface-border)',
-                  background: loginWorker === w ? 'var(--btn-calc-action)' : 'var(--btn-calc-num)',
-                  color: loginWorker === w ? 'var(--btn-calc-action-text)' : 'var(--text-main)',
-                  fontWeight: 700,
-                  fontSize: '13px',
-                  cursor: 'pointer',
-                  transition: 'all 0.15s ease'
-                }}
-              >
-                {w}
-              </button>
-            ))}
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: '6px', marginBottom: '16px' }}>
+            {WORKERS.map((w) => {
+              const active = loginWorker === w;
+              return (
+                <button
+                  key={w}
+                  type="button"
+                  onClick={() => setLoginWorker(w)}
+                  style={{
+                    padding: '11px 4px',
+                    borderRadius: '12px',
+                    border: '1px solid',
+                    borderColor: active ? '#111827' : '#e5e7eb',
+                    background: active ? '#111827' : '#f9fafb',
+                    color: active ? '#ffffff' : '#374151',
+                    fontWeight: 700,
+                    fontSize: '12px',
+                    cursor: 'pointer',
+                    transition: 'all 0.12s ease'
+                  }}
+                >
+                  {w}
+                </button>
+              );
+            })}
           </div>
 
           <form onSubmit={handleLogin}>
-            <div style={{ marginBottom: '16px' }}>
-              <label style={{ display: 'block', fontSize: '12px', fontWeight: 600, color: 'var(--text-muted)', marginBottom: '6px' }}>
+            <div style={{ marginBottom: '14px' }}>
+              <label style={{ display: 'block', fontSize: '11px', fontWeight: 600, color: '#6b7280', marginBottom: '5px' }}>
                 Password (Default: worker123)
               </label>
               <input
                 type="password"
-                placeholder="Enter password"
+                placeholder="worker123"
                 value={loginPassword}
                 onChange={(e) => setLoginPassword(e.target.value)}
                 style={{
                   width: '100%',
-                  padding: '14px 16px',
-                  background: 'var(--surface-raised)',
-                  border: '1px solid var(--surface-border)',
-                  borderRadius: '14px',
-                  color: 'var(--text-main)',
-                  fontSize: '15px',
+                  padding: '12px 14px',
+                  background: '#f9fafb',
+                  border: '1px solid #e5e7eb',
+                  borderRadius: '12px',
+                  color: '#111827',
+                  fontSize: '14px',
                   outline: 'none',
                 }}
                 autoFocus
@@ -636,8 +639,8 @@ export function App() {
             </div>
 
             {loginError && (
-              <div style={{ color: '#ef4444', fontSize: '13px', marginBottom: '16px', display: 'flex', alignItems: 'center', gap: '6px' }}>
-                <AlertCircle size={16} /> {loginError}
+              <div style={{ color: '#dc2626', fontSize: '12px', marginBottom: '12px', display: 'flex', alignItems: 'center', gap: '5px' }}>
+                <AlertCircle size={14} /> {loginError}
               </div>
             )}
 
@@ -645,18 +648,14 @@ export function App() {
               type="submit"
               style={{
                 width: '100%',
-                padding: '15px',
-                borderRadius: '16px',
+                padding: '13px',
+                borderRadius: '14px',
                 border: 'none',
-                background: 'var(--btn-calc-action)',
-                color: 'var(--btn-calc-action-text)',
-                fontSize: '15px',
+                background: '#111827',
+                color: '#ffffff',
+                fontSize: '14px',
                 fontWeight: 700,
-                cursor: 'pointer',
-                display: 'flex',
-                alignItems: 'center',
-                justifyContent: 'center',
-                gap: '8px'
+                cursor: 'pointer'
               }}
             >
               Sign In as {loginWorker}
@@ -664,127 +663,132 @@ export function App() {
           </form>
         </div>
 
-        <div style={{ textAlign: 'center', marginTop: '24px' }}>
+        <div style={{ textAlign: 'center', marginTop: '20px' }}>
           <button
             onClick={() => setShowSettings(true)}
             style={{
               background: 'none',
               border: 'none',
-              color: 'var(--text-muted)',
-              fontSize: '13px',
+              color: '#6b7280',
+              fontSize: '12px',
+              fontWeight: 500,
               display: 'inline-flex',
               alignItems: 'center',
-              gap: '6px',
+              gap: '5px',
               cursor: 'pointer'
             }}
           >
-            <Settings size={14} /> Database & Supabase Settings
+            <Settings size={13} /> Supabase Settings
           </button>
         </div>
 
-        {/* Settings Modal */}
         {showSettings && renderSettingsModal()}
       </div>
     );
   }
 
   // -------------------------------------------------------------------------
-  // MAIN DASHBOARD (When Logged In)
+  // MAIN DASHBOARD (White Aesthetic, Shredded Compact, Fixed Mobile Screen)
   // -------------------------------------------------------------------------
   return (
-    <div style={{ padding: '16px 16px 110px', width: '100%', boxSizing: 'border-box' }}>
-      {/* Top Header */}
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '12px' }}>
-        <div>
-          <h1 style={{ fontSize: '20px', fontWeight: 800, letterSpacing: '-0.5px', lineHeight: 1.2 }}>Gate Tracker</h1>
-          <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginTop: '2px' }}>
-            <span style={{ fontSize: '12px', color: 'var(--text-muted)', fontWeight: 600 }}>KIZAD · CC</span>
-            <span style={{ 
-              fontSize: '11px', padding: '2px 8px', borderRadius: '10px', 
-              background: isSupabaseConfigured ? 'rgba(16, 185, 129, 0.15)' : 'rgba(245, 158, 11, 0.15)',
-              color: isSupabaseConfigured ? '#10b981' : '#f59e0b',
-              fontWeight: 700,
-              display: 'inline-flex', alignItems: 'center', gap: '4px'
-            }}>
-              {isSupabaseConfigured ? '🟢 Live Supabase' : '🟡 Local Mode'}
-            </span>
+    <div style={{ 
+      height: '100dvh', width: '100%', 
+      display: 'flex', flexDirection: 'column', 
+      overflow: 'hidden', background: '#f5f6f9', position: 'relative' 
+    }}>
+      
+      {/* 1. FIXED TOP HEADER BAR (Compact) */}
+      <header style={{ 
+        flexShrink: 0, padding: '12px 14px 8px', 
+        background: '#ffffff', borderBottom: '1px solid #e5e7eb',
+        boxShadow: '0 1px 3px rgba(0,0,0,0.02)'
+      }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+          <div>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+              <span style={{ fontSize: '16px', fontWeight: 800, color: '#111827', letterSpacing: '-0.4px' }}>
+                Gate Tracker
+              </span>
+              <span style={{ 
+                fontSize: '9px', fontWeight: 700, padding: '2px 6px', borderRadius: '6px', 
+                background: isSupabaseConfigured ? '#ecfdf5' : '#fef3c7',
+                color: isSupabaseConfigured ? '#059669' : '#d97706',
+                border: `1px solid ${isSupabaseConfigured ? '#a7f3d0' : '#fde68a'}`
+              }}>
+                {isSupabaseConfigured ? 'Live' : 'Local'}
+              </span>
+            </div>
+            <div style={{ fontSize: '11px', color: '#6b7280', fontWeight: 500 }}>
+              KIZAD · CC
+            </div>
+          </div>
+
+          <div style={{ display: 'flex', alignItems: 'center', gap: '5px' }}>
+            <button
+              onClick={() => setShowSettings(true)}
+              title="Settings"
+              style={{
+                width: '32px', height: '32px', borderRadius: '10px',
+                background: '#f3f4f6', border: '1px solid #e5e7eb',
+                color: '#4b5563', display: 'flex', alignItems: 'center', justifyContent: 'center',
+                cursor: 'pointer'
+              }}
+            >
+              <Settings size={15} />
+            </button>
+
+            <button
+              onClick={handleLogout}
+              title="Log out"
+              style={{
+                height: '32px', padding: '0 10px', borderRadius: '10px',
+                background: '#f3f4f6', border: '1px solid #e5e7eb',
+                color: '#111827', fontSize: '11px', fontWeight: 700,
+                display: 'flex', alignItems: 'center', gap: '5px',
+                cursor: 'pointer'
+              }}
+            >
+              <span>{currentWorker}</span>
+              <LogOut size={12} color="#6b7280" />
+            </button>
           </div>
         </div>
 
-        <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
-          <button
-            onClick={() => setShowSettings(true)}
-            title="Database Settings"
-            style={{
-              width: '38px', height: '38px', borderRadius: '12px',
-              background: 'var(--surface)', border: '1px solid var(--surface-border)',
-              color: 'var(--text-muted)', display: 'flex', alignItems: 'center', justifyContent: 'center',
-              cursor: 'pointer'
-            }}
-          >
-            <Settings size={18} />
-          </button>
+        {/* Shredded Controls Line: Date + Photo + Add */}
+        <div style={{ display: 'flex', gap: '6px', marginTop: '10px', alignItems: 'center' }}>
+          <div style={{ position: 'relative', flex: 1.2 }}>
+            <input
+              type="date"
+              value={date}
+              onChange={(e) => setDate(e.target.value)}
+              style={{
+                width: '100%',
+                padding: '7px 8px',
+                borderRadius: '10px',
+                background: '#f9fafb',
+                border: '1px solid #e5e7eb',
+                color: '#111827',
+                fontSize: '12px',
+                fontWeight: 700,
+                outline: 'none',
+                boxSizing: 'border-box'
+              }}
+            />
+          </div>
 
-          <button
-            onClick={handleLogout}
-            title="Log out"
-            style={{
-              padding: '8px 12px', borderRadius: '12px',
-              background: 'var(--surface)', border: '1px solid var(--surface-border)',
-              color: 'var(--text-main)', fontSize: '12px', fontWeight: 700,
-              display: 'flex', alignItems: 'center', gap: '6px',
-              cursor: 'pointer'
-            }}
-          >
-            <span>{currentWorker}</span>
-            <LogOut size={14} color="var(--text-muted)" />
-          </button>
-        </div>
-      </div>
-
-      {/* Date & Action Panel (Calculator minimal card) */}
-      <div style={{ 
-        background: 'var(--surface)', borderRadius: '20px', padding: '14px', 
-        border: '1px solid var(--surface-border)', marginBottom: '12px' 
-      }}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: '10px', marginBottom: '10px' }}>
-          <Calendar size={18} color="var(--text-muted)" />
-          <input
-            type="date"
-            value={date}
-            onChange={(e) => setDate(e.target.value)}
-            style={{
-              background: 'var(--surface-raised)',
-              border: '1px solid var(--surface-border)',
-              borderRadius: '12px',
-              padding: '10px 14px',
-              color: 'var(--text-main)',
-              fontFamily: 'inherit',
-              fontWeight: 700,
-              fontSize: '14px',
-              width: '100%',
-              outline: 'none',
-              cursor: 'pointer'
-            }}
-          />
-        </div>
-
-        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '8px' }}>
           <button
             onClick={() => fileInputRef.current?.click()}
             disabled={parsingImage}
             style={{
-              padding: '12px', borderRadius: '14px',
-              background: 'var(--btn-calc-action)',
-              color: 'var(--btn-calc-action-text)',
-              border: 'none',
-              fontWeight: 700, fontSize: '13px',
-              display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '6px',
-              cursor: 'pointer'
+              padding: '7px 11px', borderRadius: '10px',
+              background: '#111827', color: '#ffffff',
+              border: 'none', fontWeight: 700, fontSize: '11px',
+              display: 'flex', alignItems: 'center', gap: '4px',
+              cursor: 'pointer', whiteSpace: 'nowrap'
             }}
           >
-            <Upload size={16} />
-            {parsingImage ? 'Scanning…' : 'Upload photo'}
+            <Upload size={13} />
+            {parsingImage ? 'Scanning…' : 'Photo'}
           </button>
           <input
             ref={fileInputRef}
@@ -797,34 +801,33 @@ export function App() {
           <button
             onClick={() => setShowAdd(!showAdd)}
             style={{
-              padding: '12px', borderRadius: '14px',
-              background: 'var(--btn-calc-num)',
-              color: 'var(--text-main)',
-              border: '1px solid var(--surface-border)',
-              fontWeight: 700, fontSize: '13px',
-              display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '6px',
-              cursor: 'pointer'
+              padding: '7px 11px', borderRadius: '10px',
+              background: showAdd ? '#111827' : '#ffffff',
+              color: showAdd ? '#ffffff' : '#111827',
+              border: '1px solid #e5e7eb',
+              fontWeight: 700, fontSize: '11px',
+              display: 'flex', alignItems: 'center', gap: '3px',
+              cursor: 'pointer', whiteSpace: 'nowrap'
             }}
           >
-            <Plus size={16} />
-            + Truck
+            <Plus size={13} />
+            Truck
           </button>
         </div>
 
-        {/* Quick Add Form Drawer */}
+        {/* Quick Add Form Dropdown */}
         {showAdd && (
-          <form onSubmit={handleAddTruck} style={{ marginTop: '12px', paddingTop: '12px', borderTop: '1px solid var(--surface-border)' }}>
-            <div style={{ display: 'flex', gap: '8px', marginBottom: '8px' }}>
+          <form onSubmit={handleAddTruck} style={{ marginTop: '8px', paddingTop: '8px', borderTop: '1px dashed #e5e7eb' }}>
+            <div style={{ display: 'flex', gap: '5px', marginBottom: '5px' }}>
               <input
                 type="text"
-                placeholder="Plate (e.g. 3187YB or 39263)"
+                placeholder="Plate (e.g. 3187YB)"
                 value={newPlate}
                 onChange={(e) => setNewPlate(e.target.value)}
                 style={{
-                  flex: 2,
-                  padding: '12px', borderRadius: '12px',
-                  background: 'var(--surface-raised)', border: '1px solid var(--surface-border)',
-                  color: 'var(--text-main)', fontSize: '14px', outline: 'none'
+                  flex: 2, padding: '8px 10px', borderRadius: '8px',
+                  background: '#f9fafb', border: '1px solid #e5e7eb',
+                  color: '#111827', fontSize: '12px', outline: 'none'
                 }}
                 autoFocus
               />
@@ -832,167 +835,165 @@ export function App() {
                 value={newCountry}
                 onChange={(e) => setNewCountry(e.target.value as 'OMN' | 'DXB')}
                 style={{
-                  flex: 1,
-                  padding: '12px', borderRadius: '12px',
-                  background: 'var(--surface-raised)', border: '1px solid var(--surface-border)',
-                  color: 'var(--text-main)', fontSize: '14px', fontWeight: 700, outline: 'none'
+                  flex: 1, padding: '8px 6px', borderRadius: '8px',
+                  background: '#f9fafb', border: '1px solid #e5e7eb',
+                  color: '#111827', fontSize: '12px', fontWeight: 700, outline: 'none'
                 }}
               >
                 <option value="OMN">OMN (6)</option>
                 <option value="DXB">DXB (5)</option>
               </select>
             </div>
-            <div style={{ display: 'flex', gap: '8px' }}>
+            <div style={{ display: 'flex', gap: '5px' }}>
               <input
                 type="text"
-                placeholder="Driver Name (Optional)"
+                placeholder="Driver (Optional)"
                 value={newDriver}
                 onChange={(e) => setNewDriver(e.target.value)}
                 style={{
-                  flex: 2,
-                  padding: '12px', borderRadius: '12px',
-                  background: 'var(--surface-raised)', border: '1px solid var(--surface-border)',
-                  color: 'var(--text-main)', fontSize: '14px', outline: 'none'
+                  flex: 2, padding: '8px 10px', borderRadius: '8px',
+                  background: '#f9fafb', border: '1px solid #e5e7eb',
+                  color: '#111827', fontSize: '12px', outline: 'none'
                 }}
               />
               <button
                 type="submit"
                 style={{
-                  flex: 1,
-                  padding: '12px', borderRadius: '12px',
-                  background: 'var(--btn-calc-action)', color: 'var(--btn-calc-action-text)',
-                  border: 'none', fontWeight: 700, fontSize: '14px', cursor: 'pointer'
+                  flex: 1, padding: '8px', borderRadius: '8px',
+                  background: '#111827', color: '#ffffff',
+                  border: 'none', fontWeight: 700, fontSize: '12px', cursor: 'pointer'
                 }}
               >
-                Save
+                Add
               </button>
             </div>
           </form>
         )}
-      </div>
 
-      {/* Stats Counter Bar (Calculator keys look) */}
-      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: '8px', marginBottom: '12px' }}>
-        <div style={{ 
-          background: 'var(--surface)', borderRadius: '16px', padding: '12px 8px', 
-          textAlign: 'center', border: '1px solid var(--surface-border)' 
-        }}>
-          <span style={{ display: 'block', fontSize: '22px', fontWeight: 800, color: '#3b82f6', fontFamily: 'JetBrains Mono' }}>
-            {sGate1}
-          </span>
-          <span style={{ fontSize: '11px', fontWeight: 600, color: 'var(--text-muted)' }}>Gate 1</span>
+        {/* Compact Shredded Stats Pills */}
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: '6px', marginTop: '8px' }}>
+          <div style={{ 
+            background: '#eff6ff', borderRadius: '10px', padding: '6px', 
+            textAlign: 'center', border: '1px solid #dbeafe', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '6px'
+          }}>
+            <span style={{ fontSize: '14px', fontWeight: 800, color: '#2563eb', fontFamily: 'JetBrains Mono' }}>
+              {sGate1}
+            </span>
+            <span style={{ fontSize: '10px', fontWeight: 700, color: '#1e40af' }}>Gate 1</span>
+          </div>
+
+          <div style={{ 
+            background: '#ecfdf5', borderRadius: '10px', padding: '6px', 
+            textAlign: 'center', border: '1px solid #a7f3d0', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '6px'
+          }}>
+            <span style={{ fontSize: '14px', fontWeight: 800, color: '#059669', fontFamily: 'JetBrains Mono' }}>
+              {sLoaded}
+            </span>
+            <span style={{ fontSize: '10px', fontWeight: 700, color: '#065f46' }}>Loaded</span>
+          </div>
+
+          <div style={{ 
+            background: '#f9fafb', borderRadius: '10px', padding: '6px', 
+            textAlign: 'center', border: '1px solid #e5e7eb', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '6px'
+          }}>
+            <span style={{ fontSize: '14px', fontWeight: 800, color: '#111827', fontFamily: 'JetBrains Mono' }}>
+              {sTotal}
+            </span>
+            <span style={{ fontSize: '10px', fontWeight: 700, color: '#6b7280' }}>Total</span>
+          </div>
         </div>
 
-        <div style={{ 
-          background: 'var(--surface)', borderRadius: '16px', padding: '12px 8px', 
-          textAlign: 'center', border: '1px solid var(--surface-border)' 
-        }}>
-          <span style={{ display: 'block', fontSize: '22px', fontWeight: 800, color: '#10b981', fontFamily: 'JetBrains Mono' }}>
-            {sLoaded}
-          </span>
-          <span style={{ fontSize: '11px', fontWeight: 600, color: 'var(--text-muted)' }}>Loaded</span>
-        </div>
-
-        <div style={{ 
-          background: 'var(--surface)', borderRadius: '16px', padding: '12px 8px', 
-          textAlign: 'center', border: '1px solid var(--surface-border)' 
-        }}>
-          <span style={{ display: 'block', fontSize: '22px', fontWeight: 800, color: 'var(--text-main)', fontFamily: 'JetBrains Mono' }}>
-            {sTotal}
-          </span>
-          <span style={{ fontSize: '11px', fontWeight: 600, color: 'var(--text-muted)' }}>Total</span>
-        </div>
-      </div>
-
-      {/* Search Input */}
-      <div style={{ position: 'relative', marginBottom: '12px' }}>
-        <Search size={16} color="var(--text-muted)" style={{ position: 'absolute', left: '14px', top: '15px' }} />
-        <input
-          type="text"
-          placeholder="Search plate or driver…"
-          value={search}
-          onChange={(e) => setSearch(e.target.value)}
-          style={{
-            width: '100%',
-            padding: '13px 14px 13px 40px',
-            background: 'var(--surface)',
-            border: '1px solid var(--surface-border)',
-            borderRadius: '16px',
-            color: 'var(--text-main)',
-            fontSize: '14px',
-            outline: 'none',
-          }}
-        />
-        {search && (
-          <button
-            onClick={() => setSearch('')}
+        {/* Slim Search Input */}
+        <div style={{ position: 'relative', marginTop: '8px' }}>
+          <Search size={13} color="#9ca3af" style={{ position: 'absolute', left: '10px', top: '9px' }} />
+          <input
+            type="text"
+            placeholder="Search plate or driver…"
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
             style={{
-              position: 'absolute', right: '12px', top: '12px',
-              background: 'none', border: 'none', color: 'var(--text-muted)', cursor: 'pointer'
+              width: '100%',
+              padding: '7px 28px 7px 28px',
+              background: '#f9fafb',
+              border: '1px solid #e5e7eb',
+              borderRadius: '10px',
+              color: '#111827',
+              fontSize: '12px',
+              outline: 'none',
+              boxSizing: 'border-box'
             }}
-          >
-            <X size={18} />
-          </button>
-        )}
-      </div>
+          />
+          {search && (
+            <button
+              onClick={() => setSearch('')}
+              style={{
+                position: 'absolute', right: '8px', top: '7px',
+                background: 'none', border: 'none', color: '#9ca3af', cursor: 'pointer'
+              }}
+            >
+              <X size={14} />
+            </button>
+          )}
+        </div>
+      </header>
 
-      {/* Trucks List */}
-      <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
+      {/* 2. SCROLLABLE TRUCK LIST (ONLY this part scrolls) */}
+      <main className="scroll-area" style={{ padding: '8px 12px 85px' }}>
         {filteredTrucks.length === 0 ? (
           <div style={{ 
-            background: 'var(--surface)', borderRadius: '20px', padding: '36px 20px', 
-            textAlign: 'center', border: '1px dashed var(--surface-border)' 
+            background: '#ffffff', borderRadius: '16px', padding: '30px 16px', 
+            textAlign: 'center', border: '1px dashed #e5e7eb', marginTop: '10px' 
           }}>
-            <Truck size={36} color="var(--text-sub)" style={{ margin: '0 auto 10px' }} />
-            <p style={{ color: 'var(--text-main)', fontWeight: 700, fontSize: '15px' }}>No trucks for this date</p>
-            <p style={{ color: 'var(--text-muted)', fontSize: '12px', marginTop: '4px' }}>
-              Upload the truck photo or tap "+ Truck" to start
+            <Truck size={30} color="#9ca3af" style={{ margin: '0 auto 8px' }} />
+            <p style={{ color: '#111827', fontWeight: 700, fontSize: '13px' }}>No trucks for this date</p>
+            <p style={{ color: '#6b7280', fontSize: '11px', marginTop: '2px' }}>
+              Tap "Photo" or "+ Truck" above
             </p>
           </div>
         ) : (
-          filteredTrucks.map((t) => {
-            const isG1 = Boolean(t.gate1_at);
-            const isG2 = Boolean(t.gate2_at);
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
+            {filteredTrucks.map((t) => {
+              const isG1 = Boolean(t.gate1_at);
+              const isG2 = Boolean(t.gate2_at);
 
-            return (
-              <div
-                key={t.id}
-                className="animate-pop"
-                style={{
-                  background: 'var(--surface)',
-                  borderRadius: '20px',
-                  padding: '14px',
-                  border: isG2 
-                    ? '1px solid rgba(16, 185, 129, 0.4)' 
-                    : isG1 
-                    ? '1px solid rgba(59, 130, 246, 0.3)' 
-                    : '1px solid var(--surface-border)',
-                  boxShadow: '0 4px 14px rgba(0,0,0,0.1)',
-                  position: 'relative'
-                }}
-              >
-                {/* Truck Header Row: Plate + Badges + Delete */}
-                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: '8px' }}>
-                  <div>
-                    <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+              return (
+                <div
+                  key={t.id}
+                  style={{
+                    background: '#ffffff',
+                    borderRadius: '14px',
+                    padding: '9px 10px',
+                    border: isG2 
+                      ? '1px solid #a7f3d0' 
+                      : isG1 
+                      ? '1px solid #bfdbfe' 
+                      : '1px solid #e5e7eb',
+                    boxShadow: '0 1px 2px rgba(0,0,0,0.03)',
+                    transition: 'border-color 0.15s ease'
+                  }}
+                >
+                  {/* Row 1: Plate, Country tag, Loaded badge, Driver, Delete */}
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '7px' }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '6px', flexWrap: 'wrap' }}>
                       <span style={{ 
                         fontFamily: 'JetBrains Mono, monospace', 
-                        fontSize: '18px', 
+                        fontSize: '15px', 
                         fontWeight: 800, 
-                        letterSpacing: '0.5px',
-                        color: 'var(--text-main)'
+                        color: '#111827',
+                        letterSpacing: '0.3px'
                       }}>
                         {t.plate}
                       </span>
+
                       <span
                         style={{
-                          fontSize: '11px',
+                          fontSize: '10px',
                           fontWeight: 800,
-                          padding: '3px 8px',
-                          borderRadius: '8px',
-                          background: t.country === 'OMN' ? 'rgba(217, 119, 6, 0.2)' : 'rgba(59, 130, 246, 0.2)',
-                          color: t.country === 'OMN' ? '#f59e0b' : '#60a5fa',
-                          border: `1px solid ${t.country === 'OMN' ? 'rgba(217, 119, 6, 0.4)' : 'rgba(59, 130, 246, 0.4)'}`
+                          padding: '1px 6px',
+                          borderRadius: '6px',
+                          background: t.country === 'OMN' ? '#fef3c7' : '#dbeafe',
+                          color: t.country === 'OMN' ? '#b45309' : '#1d4ed8',
+                          border: `1px solid ${t.country === 'OMN' ? '#fde68a' : '#bfdbfe'}`
                         }}
                       >
                         {t.country}
@@ -1000,113 +1001,109 @@ export function App() {
 
                       {isG2 && (
                         <span style={{ 
-                          fontSize: '10px', fontWeight: 800, padding: '2px 6px', borderRadius: '6px',
-                          background: 'rgba(16, 185, 129, 0.2)', color: '#10b981', textTransform: 'uppercase'
+                          fontSize: '9px', fontWeight: 800, padding: '1px 5px', borderRadius: '5px',
+                          background: '#d1fae5', color: '#065f46', textTransform: 'uppercase'
                         }}>
                           LOADED
                         </span>
                       )}
+
+                      {t.driver && (
+                        <span style={{ fontSize: '11px', color: '#6b7280', fontWeight: 500, marginLeft: '2px' }}>
+                          · {t.driver}
+                        </span>
+                      )}
                     </div>
 
-                    {t.driver && (
-                      <div style={{ fontSize: '12px', color: 'var(--text-muted)', marginTop: '2px', fontWeight: 500 }}>
-                        {t.driver}
-                      </div>
-                    )}
+                    {/* Compact Delete button */}
+                    <button
+                      onClick={() => handleDeleteTruck(t.id)}
+                      style={{
+                        background: deleteConfirmId === t.id ? '#fee2e2' : 'transparent',
+                        color: deleteConfirmId === t.id ? '#dc2626' : '#9ca3af',
+                        border: 'none',
+                        padding: '2px 5px',
+                        borderRadius: '6px',
+                        fontSize: '10px',
+                        fontWeight: 700,
+                        cursor: 'pointer'
+                      }}
+                    >
+                      {deleteConfirmId === t.id ? 'Sure?' : '✕'}
+                    </button>
                   </div>
 
-                  {/* Delete button with 2-step confirmation */}
-                  <button
-                    onClick={() => handleDeleteTruck(t.id)}
-                    style={{
-                      background: deleteConfirmId === t.id ? '#ef4444' : 'transparent',
-                      color: deleteConfirmId === t.id ? '#ffffff' : 'var(--text-sub)',
-                      border: 'none',
-                      padding: deleteConfirmId === t.id ? '4px 8px' : '4px',
-                      borderRadius: '8px',
-                      fontSize: '11px',
-                      fontWeight: 700,
-                      cursor: 'pointer'
-                    }}
-                  >
-                    {deleteConfirmId === t.id ? 'Delete?' : '✕'}
-                  </button>
-                </div>
-
-                {/* Gates and PC row */}
-                <div style={{ display: 'grid', gridTemplateColumns: '1.2fr 1.6fr 72px', gap: '8px', alignItems: 'stretch' }}>
-                  {/* Gate 1 Button */}
-                  <button
-                    type="button"
-                    onClick={() => toggleGate1(t)}
-                    style={{
-                      padding: '10px 8px',
-                      borderRadius: '14px',
-                      border: '1px solid',
-                      borderColor: isG1 ? '#2563eb' : 'var(--surface-border)',
-                      background: isG1 ? '#2563eb' : 'var(--btn-calc-num)',
-                      color: isG1 ? '#ffffff' : 'var(--text-main)',
-                      fontWeight: 700,
-                      fontSize: '12px',
-                      display: 'flex',
-                      flexDirection: 'column',
-                      alignItems: 'center',
-                      justifyContent: 'center',
-                      cursor: 'pointer',
-                      transition: 'all 0.15s ease'
-                    }}
-                  >
-                    <div style={{ display: 'flex', alignItems: 'center', gap: '4px' }}>
-                      {isG1 && <Check size={14} strokeWidth={3} />}
+                  {/* Row 2: Gate 1 + Gate 2 (LOADED) + PC input */}
+                  <div style={{ display: 'grid', gridTemplateColumns: '1fr 1.3fr 54px', gap: '5px', alignItems: 'center' }}>
+                    {/* Gate 1 Button */}
+                    <button
+                      type="button"
+                      onClick={() => toggleGate1(t)}
+                      style={{
+                        height: '34px',
+                        padding: '0 6px',
+                        borderRadius: '9px',
+                        border: '1px solid',
+                        borderColor: isG1 ? '#2563eb' : '#e5e7eb',
+                        background: isG1 ? '#2563eb' : '#f9fafb',
+                        color: isG1 ? '#ffffff' : '#374151',
+                        fontWeight: 700,
+                        fontSize: '11px',
+                        display: 'flex',
+                        alignItems: 'center',
+                        justifyContent: 'center',
+                        gap: '4px',
+                        cursor: 'pointer',
+                        transition: 'all 0.12s ease'
+                      }}
+                    >
+                      {isG1 && <Check size={12} strokeWidth={3} />}
                       <span>Gate 1</span>
-                    </div>
-                    {isG1 && t.gate1_by && (
-                      <span style={{ fontSize: '9px', opacity: 0.85, marginTop: '2px', fontWeight: 600 }}>
-                        {t.gate1_by}
-                      </span>
-                    )}
-                  </button>
+                      {isG1 && t.gate1_by && (
+                        <span style={{ fontSize: '8px', opacity: 0.85, fontWeight: 600 }}>
+                          ({t.gate1_by})
+                        </span>
+                      )}
+                    </button>
 
-                  {/* Gate 2 Button (LOADED) - LOCKED UNTIL GATE 1 IS TICKED */}
-                  <button
-                    type="button"
-                    onClick={() => toggleGate2(t)}
-                    disabled={!isG1}
-                    style={{
-                      padding: '10px 8px',
-                      borderRadius: '14px',
-                      border: '1px solid',
-                      borderColor: isG2 ? '#059669' : !isG1 ? 'transparent' : 'var(--surface-border)',
-                      background: isG2 ? '#059669' : !isG1 ? 'var(--surface-raised)' : 'var(--btn-calc-num)',
-                      color: isG2 ? '#ffffff' : !isG1 ? 'var(--text-sub)' : 'var(--text-main)',
-                      opacity: !isG1 ? 0.45 : 1,
-                      fontWeight: 700,
-                      fontSize: '12px',
-                      display: 'flex',
-                      flexDirection: 'column',
-                      alignItems: 'center',
-                      justifyContent: 'center',
-                      cursor: !isG1 ? 'not-allowed' : 'pointer',
-                      transition: 'all 0.15s ease'
-                    }}
-                  >
-                    <div style={{ display: 'flex', alignItems: 'center', gap: '4px' }}>
+                    {/* Gate 2 Button (LOADED) - LOCKED UNTIL GATE 1 IS TICKED */}
+                    <button
+                      type="button"
+                      onClick={() => toggleGate2(t)}
+                      disabled={!isG1}
+                      style={{
+                        height: '34px',
+                        padding: '0 6px',
+                        borderRadius: '9px',
+                        border: '1px solid',
+                        borderColor: isG2 ? '#059669' : !isG1 ? '#edf0f4' : '#e5e7eb',
+                        background: isG2 ? '#059669' : !isG1 ? '#f9fafb' : '#f9fafb',
+                        color: isG2 ? '#ffffff' : !isG1 ? '#9ca3af' : '#111827',
+                        opacity: !isG1 ? 0.5 : 1,
+                        fontWeight: 700,
+                        fontSize: '11px',
+                        display: 'flex',
+                        alignItems: 'center',
+                        justifyContent: 'center',
+                        gap: '4px',
+                        cursor: !isG1 ? 'not-allowed' : 'pointer',
+                        transition: 'all 0.12s ease'
+                      }}
+                    >
                       {!isG1 ? (
-                        <Lock size={12} />
+                        <Lock size={11} />
                       ) : isG2 ? (
-                        <Check size={14} strokeWidth={3} />
+                        <Check size={12} strokeWidth={3} />
                       ) : null}
-                      <span>Gate 2 · {isG2 ? 'LOADED' : 'Load'}</span>
-                    </div>
-                    {isG2 && t.gate2_by && (
-                      <span style={{ fontSize: '9px', opacity: 0.85, marginTop: '2px', fontWeight: 600 }}>
-                        {t.gate2_by}
-                      </span>
-                    )}
-                  </button>
+                      <span>G2 · {isG2 ? 'LOADED' : 'Load'}</span>
+                      {isG2 && t.gate2_by && (
+                        <span style={{ fontSize: '8px', opacity: 0.85, fontWeight: 600 }}>
+                          ({t.gate2_by})
+                        </span>
+                      )}
+                    </button>
 
-                  {/* PC Box */}
-                  <div style={{ position: 'relative' }}>
+                    {/* Compact PC Box */}
                     <input
                       type="number"
                       inputMode="numeric"
@@ -1114,16 +1111,15 @@ export function App() {
                       value={t.pcs ?? ''}
                       onChange={(e) => handlePcsChange(t, e.target.value)}
                       style={{
+                        height: '34px',
                         width: '100%',
-                        height: '100%',
-                        minHeight: '44px',
-                        padding: '6px',
-                        borderRadius: '14px',
-                        background: 'var(--surface-raised)',
-                        border: '1px solid var(--surface-border)',
-                        color: 'var(--text-main)',
+                        padding: '0 4px',
+                        borderRadius: '9px',
+                        background: '#f9fafb',
+                        border: '1px solid #e5e7eb',
+                        color: '#111827',
                         fontFamily: 'JetBrains Mono',
-                        fontSize: '14px',
+                        fontSize: '12px',
                         fontWeight: 700,
                         textAlign: 'center',
                         outline: 'none',
@@ -1132,106 +1128,105 @@ export function App() {
                     />
                   </div>
                 </div>
-              </div>
-            );
-          })
+              );
+            })}
+          </div>
         )}
-      </div>
+      </main>
 
-      {/* Sticky Bottom Action Bar with Copy Button */}
-      <div
+      {/* 3. FIXED BOTTOM BAR (Floating Dock with Copy Report) */}
+      <footer
         style={{
-          position: 'fixed',
+          position: 'absolute',
           bottom: 0,
           left: 0,
           right: 0,
-          padding: '12px 16px calc(12px + var(--safe-bottom))',
-          background: 'linear-gradient(transparent, var(--bg) 40%)',
+          padding: '10px 14px calc(10px + var(--safe-bottom))',
+          background: 'linear-gradient(to top, #ffffff 75%, rgba(255, 255, 255, 0))',
           display: 'flex',
           justifyContent: 'center',
           pointerEvents: 'none',
-          zIndex: 90
+          zIndex: 40
         }}
       >
-        <div style={{ width: '100%', maxWidth: '500px', pointerEvents: 'auto' }}>
-          <button
-            onClick={copyDayReport}
-            style={{
-              width: '100%',
-              padding: '16px',
-              borderRadius: '18px',
-              border: 'none',
-              background: 'var(--btn-calc-action)',
-              color: 'var(--btn-calc-action-text)',
-              fontSize: '15px',
-              fontWeight: 800,
-              cursor: 'pointer',
-              display: 'flex',
-              alignItems: 'center',
-              justifyContent: 'center',
-              gap: '8px',
-              boxShadow: '0 8px 24px rgba(0, 0, 0, 0.4)',
-              transition: 'transform 0.1s active'
-            }}
-          >
-            <Copy size={18} />
-            Copy Day Report ({sLoaded} Loaded)
-          </button>
-        </div>
-      </div>
+        <button
+          onClick={copyDayReport}
+          style={{
+            width: '100%',
+            maxWidth: '460px',
+            padding: '13px',
+            borderRadius: '14px',
+            border: 'none',
+            background: '#111827',
+            color: '#ffffff',
+            fontSize: '14px',
+            fontWeight: 800,
+            cursor: 'pointer',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            gap: '7px',
+            boxShadow: '0 4px 12px rgba(0, 0, 0, 0.15)',
+            pointerEvents: 'auto'
+          }}
+        >
+          <Copy size={16} />
+          Copy Day Report ({sLoaded} Loaded)
+        </button>
+      </footer>
 
-      {/* Floating Toast Notification */}
+      {/* Toast Notification */}
       {toastMsg && (
         <div
           style={{
-            position: 'fixed',
-            top: '20px',
+            position: 'absolute',
+            top: '14px',
             left: '50%',
             transform: 'translateX(-50%)',
-            background: 'var(--text-main)',
-            color: 'var(--bg)',
-            padding: '10px 18px',
-            borderRadius: '14px',
-            fontSize: '13px',
+            background: '#111827',
+            color: '#ffffff',
+            padding: '8px 14px',
+            borderRadius: '10px',
+            fontSize: '12px',
             fontWeight: 700,
             zIndex: 999,
-            boxShadow: '0 8px 20px rgba(0,0,0,0.3)',
-            animation: 'popIn 0.2s cubic-bezier(0.16, 1, 0.3, 1)'
+            boxShadow: '0 4px 14px rgba(0,0,0,0.2)',
+            whiteSpace: 'nowrap'
           }}
         >
           {toastMsg}
         </div>
       )}
 
-      {/* Upload Fallback Modal */}
+      {/* Upload/Paste Modal */}
       {showUploadModal && (
         <div style={{
-          position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.7)',
+          position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.5)',
           display: 'flex', alignItems: 'center', justifyContent: 'center',
-          padding: '20px', zIndex: 100
+          padding: '16px', zIndex: 100
         }}>
           <div style={{
-            background: 'var(--surface)', borderRadius: '24px', padding: '24px',
-            width: '100%', maxWidth: '420px', border: '1px solid var(--surface-border)'
+            background: '#ffffff', borderRadius: '18px', padding: '18px',
+            width: '100%', maxWidth: '380px', border: '1px solid #e5e7eb',
+            boxShadow: '0 10px 25px rgba(0,0,0,0.1)'
           }}>
-            <h3 style={{ fontSize: '16px', fontWeight: 800, marginBottom: '8px' }}>Paste Truck List</h3>
-            <p style={{ fontSize: '12px', color: 'var(--text-muted)', marginBottom: '14px' }}>
-              Paste lines from your photo or document. Format: <br />
-              <code style={{ fontSize: '11px' }}>3187YB OMN Salim</code> or <code style={{ fontSize: '11px' }}>39263 DXB</code>
+            <h3 style={{ fontSize: '15px', fontWeight: 800, marginBottom: '6px' }}>Paste Truck List</h3>
+            <p style={{ fontSize: '11px', color: '#6b7280', marginBottom: '10px' }}>
+              Format: <code style={{ background: '#f3f4f6', padding: '2px 4px', borderRadius: '4px' }}>3187YB OMN</code> or <code style={{ background: '#f3f4f6', padding: '2px 4px', borderRadius: '4px' }}>39263 DXB</code>
             </p>
             <textarea
-              rows={6}
-              placeholder="Paste truck list here…"
+              rows={5}
+              placeholder="Paste truck list lines here…"
               value={uploadText}
               onChange={(e) => setUploadText(e.target.value)}
               style={{
-                width: '100%', padding: '12px', borderRadius: '14px',
-                background: 'var(--surface-raised)', border: '1px solid var(--surface-border)',
-                color: 'var(--text-main)', fontFamily: 'JetBrains Mono', fontSize: '13px',
-                outline: 'none', marginBottom: '14px', boxSizing: 'border-box'
+                width: '100%', padding: '10px', borderRadius: '10px',
+                background: '#f9fafb', border: '1px solid #e5e7eb',
+                color: '#111827', fontFamily: 'JetBrains Mono', fontSize: '12px',
+                outline: 'none', marginBottom: '12px', boxSizing: 'border-box'
               }}
             />
-            <div style={{ display: 'flex', gap: '8px' }}>
+            <div style={{ display: 'flex', gap: '6px' }}>
               <button
                 onClick={() => {
                   parseAndAddRows(uploadText);
@@ -1239,9 +1234,9 @@ export function App() {
                   setShowUploadModal(false);
                 }}
                 style={{
-                  flex: 1, padding: '12px', borderRadius: '14px',
-                  background: 'var(--btn-calc-action)', color: 'var(--btn-calc-action-text)',
-                  border: 'none', fontWeight: 700, cursor: 'pointer'
+                  flex: 1, padding: '10px', borderRadius: '10px',
+                  background: '#111827', color: '#ffffff',
+                  border: 'none', fontWeight: 700, fontSize: '12px', cursor: 'pointer'
                 }}
               >
                 Add Trucks
@@ -1249,9 +1244,9 @@ export function App() {
               <button
                 onClick={() => setShowUploadModal(false)}
                 style={{
-                  padding: '12px 18px', borderRadius: '14px',
-                  background: 'var(--btn-calc-num)', color: 'var(--text-main)',
-                  border: '1px solid var(--surface-border)', fontWeight: 600, cursor: 'pointer'
+                  padding: '10px 14px', borderRadius: '10px',
+                  background: '#f3f4f6', color: '#374151',
+                  border: '1px solid #e5e7eb', fontWeight: 600, fontSize: '12px', cursor: 'pointer'
                 }}
               >
                 Cancel
@@ -1266,38 +1261,38 @@ export function App() {
     </div>
   );
 
-  // Modal for Supabase & API keys
+  // Settings Modal
   function renderSettingsModal() {
     return (
       <div style={{
-        position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.7)',
+        position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.5)',
         display: 'flex', alignItems: 'center', justifyContent: 'center',
-        padding: '20px', zIndex: 100
+        padding: '16px', zIndex: 100
       }}>
         <div style={{
-          background: 'var(--surface)', borderRadius: '24px', padding: '24px',
-          width: '100%', maxWidth: '440px', border: '1px solid var(--surface-border)',
-          maxHeight: '90vh', overflowY: 'auto'
+          background: '#ffffff', borderRadius: '20px', padding: '20px',
+          width: '100%', maxWidth: '400px', border: '1px solid #e5e7eb',
+          boxShadow: '0 10px 25px rgba(0,0,0,0.1)'
         }}>
-          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '16px' }}>
-            <h3 style={{ fontSize: '18px', fontWeight: 800, display: 'flex', alignItems: 'center', gap: '8px' }}>
-              <Database size={20} /> Supabase Settings
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '12px' }}>
+            <h3 style={{ fontSize: '16px', fontWeight: 800, display: 'flex', alignItems: 'center', gap: '6px' }}>
+              <Database size={17} /> Supabase Settings
             </h3>
             <button
               onClick={() => setShowSettings(false)}
-              style={{ background: 'none', border: 'none', color: 'var(--text-muted)', cursor: 'pointer' }}
+              style={{ background: 'none', border: 'none', color: '#9ca3af', cursor: 'pointer' }}
             >
-              <X size={20} />
+              <X size={18} />
             </button>
           </div>
 
-          <p style={{ fontSize: '12px', color: 'var(--text-muted)', marginBottom: '16px', lineHeight: 1.5 }}>
-            Paste your free Supabase project keys here so all 6 workers on different phones sync live in real time.
+          <p style={{ fontSize: '11px', color: '#6b7280', marginBottom: '14px', lineHeight: 1.4 }}>
+            Enter your free Supabase keys below to sync all 6 workers on different phones in real time:
           </p>
 
-          <div style={{ marginBottom: '14px' }}>
-            <label style={{ display: 'block', fontSize: '12px', fontWeight: 600, marginBottom: '6px' }}>
-              Supabase Project URL
+          <div style={{ marginBottom: '10px' }}>
+            <label style={{ display: 'block', fontSize: '11px', fontWeight: 600, marginBottom: '4px' }}>
+              Supabase URL
             </label>
             <input
               type="text"
@@ -1305,33 +1300,33 @@ export function App() {
               value={sbUrl}
               onChange={(e) => setSbUrl(e.target.value)}
               style={{
-                width: '100%', padding: '12px', borderRadius: '12px',
-                background: 'var(--surface-raised)', border: '1px solid var(--surface-border)',
-                color: 'var(--text-main)', fontSize: '13px', outline: 'none'
+                width: '100%', padding: '9px 10px', borderRadius: '10px',
+                background: '#f9fafb', border: '1px solid #e5e7eb',
+                color: '#111827', fontSize: '12px', outline: 'none'
               }}
             />
           </div>
 
-          <div style={{ marginBottom: '14px' }}>
-            <label style={{ display: 'block', fontSize: '12px', fontWeight: 600, marginBottom: '6px' }}>
+          <div style={{ marginBottom: '10px' }}>
+            <label style={{ display: 'block', fontSize: '11px', fontWeight: 600, marginBottom: '4px' }}>
               Supabase Anon Key
             </label>
             <input
               type="password"
-              placeholder="eyJhbGciOi..."
+              placeholder="eyJhbGci..."
               value={sbKey}
               onChange={(e) => setSbKey(e.target.value)}
               style={{
-                width: '100%', padding: '12px', borderRadius: '12px',
-                background: 'var(--surface-raised)', border: '1px solid var(--surface-border)',
-                color: 'var(--text-main)', fontSize: '13px', outline: 'none'
+                width: '100%', padding: '9px 10px', borderRadius: '10px',
+                background: '#f9fafb', border: '1px solid #e5e7eb',
+                color: '#111827', fontSize: '12px', outline: 'none'
               }}
             />
           </div>
 
-          <div style={{ marginBottom: '20px' }}>
-            <label style={{ display: 'block', fontSize: '12px', fontWeight: 600, marginBottom: '6px' }}>
-              Gemini API Key (Optional for photo OCR)
+          <div style={{ marginBottom: '16px' }}>
+            <label style={{ display: 'block', fontSize: '11px', fontWeight: 600, marginBottom: '4px' }}>
+              Gemini Key (Optional for photo OCR)
             </label>
             <input
               type="password"
@@ -1339,20 +1334,20 @@ export function App() {
               value={geminiKey}
               onChange={(e) => setGeminiKey(e.target.value)}
               style={{
-                width: '100%', padding: '12px', borderRadius: '12px',
-                background: 'var(--surface-raised)', border: '1px solid var(--surface-border)',
-                color: 'var(--text-main)', fontSize: '13px', outline: 'none'
+                width: '100%', padding: '9px 10px', borderRadius: '10px',
+                background: '#f9fafb', border: '1px solid #e5e7eb',
+                color: '#111827', fontSize: '12px', outline: 'none'
               }}
             />
           </div>
 
-          <div style={{ display: 'flex', gap: '8px' }}>
+          <div style={{ display: 'flex', gap: '6px' }}>
             <button
               onClick={handleSaveSettings}
               style={{
-                flex: 1, padding: '13px', borderRadius: '14px',
-                background: 'var(--btn-calc-action)', color: 'var(--btn-calc-action-text)',
-                border: 'none', fontWeight: 700, cursor: 'pointer'
+                flex: 1, padding: '10px', borderRadius: '10px',
+                background: '#111827', color: '#ffffff',
+                border: 'none', fontWeight: 700, fontSize: '12px', cursor: 'pointer'
               }}
             >
               Save & Connect
@@ -1360,9 +1355,9 @@ export function App() {
             <button
               onClick={() => setShowSettings(false)}
               style={{
-                padding: '13px 18px', borderRadius: '14px',
-                background: 'var(--btn-calc-num)', color: 'var(--text-main)',
-                border: '1px solid var(--surface-border)', fontWeight: 600, cursor: 'pointer'
+                padding: '10px 14px', borderRadius: '10px',
+                background: '#f3f4f6', color: '#374151',
+                border: '1px solid #e5e7eb', fontWeight: 600, fontSize: '12px', cursor: 'pointer'
               }}
             >
               Close

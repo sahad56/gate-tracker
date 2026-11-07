@@ -44,3 +44,4 @@ ALTER PUBLICATION supabase_realtime ADD TABLE public.trucks;
 
 -- Verify setup
 SELECT 'Gate Tracker database setup complete! All 6 workers can sync in real time.' AS status;
+

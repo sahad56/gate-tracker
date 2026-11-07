@@ -1,46 +1,32 @@
-@import url('https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&family=JetBrains+Mono:wght@500;600&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&family=JetBrains+Mono:wght@500;600;700&display=swap');
 
 :root {
-  --bg: #090a0d;
-  --surface: #14161b;
-  --surface-raised: #1c1f26;
-  --surface-border: #282c37;
-  --text-main: #f4f5f8;
-  --text-muted: #8b92a2;
-  --text-sub: #5d6474;
+  --bg: #f5f6f9;
+  --surface: #ffffff;
+  --surface-raised: #f9fafb;
+  --surface-border: #e5e7eb;
+  --surface-border-subtle: #edf0f4;
+  --text-main: #111827;
+  --text-muted: #6b7280;
+  --text-sub: #9ca3af;
   
   --accent-gate1: #2563eb;
-  --accent-gate1-active: #3b82f6;
+  --accent-gate1-light: #eff6ff;
   --accent-gate2: #059669;
-  --accent-gate2-active: #10b981;
+  --accent-gate2-light: #ecfdf5;
   
-  --badge-omn: #d97706;
-  --badge-dxb: #3b82f6;
+  --badge-omn: #b45309;
+  --badge-omn-bg: #fef3c7;
+  --badge-dxb: #1d4ed8;
+  --badge-dxb-bg: #dbeafe;
   
-  --btn-calc-num: #222630;
-  --btn-calc-num-active: #2e3442;
-  --btn-calc-fn: #2b303d;
-  --btn-calc-action: #f4f5f8;
-  --btn-calc-action-text: #090a0d;
+  --btn-action: #111827;
+  --btn-action-text: #ffffff;
+  --btn-ghost: #f3f4f6;
+  --btn-ghost-hover: #e5e7eb;
 
   --safe-top: env(safe-area-inset-top, 0px);
   --safe-bottom: env(safe-area-inset-bottom, 0px);
-}
-
-[data-theme="light"] {
-  --bg: #eceff3;
-  --surface: #ffffff;
-  --surface-raised: #f5f7fa;
-  --surface-border: #dbe0e8;
-  --text-main: #11141a;
-  --text-muted: #5e6676;
-  --text-sub: #8c95a6;
-  
-  --btn-calc-num: #e2e6ed;
-  --btn-calc-num-active: #d1d7e2;
-  --btn-calc-fn: #d8dde7;
-  --btn-calc-action: #11141a;
-  --btn-calc-action-text: #ffffff;
 }
 
 * {
@@ -50,58 +36,59 @@
   -webkit-tap-highlight-color: transparent;
 }
 
-body {
+html, body {
+  height: 100%;
+  height: 100dvh;
+  width: 100%;
+  overflow: hidden; /* Fix screen, no outer scrolling */
+  overscroll-behavior: none;
   background-color: var(--bg);
   color: var(--text-main);
   font-family: 'Plus Jakarta Sans', system-ui, -apple-system, sans-serif;
-  min-height: 100vh;
-  min-height: 100dvh;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  overflow-x: hidden;
   user-select: none;
+  -webkit-user-select: none;
 }
 
 #root {
+  height: 100%;
+  height: 100dvh;
   width: 100%;
-  max-width: 500px;
-  min-height: 100vh;
-  min-height: 100dvh;
+  max-width: 480px;
+  margin: 0 auto;
   display: flex;
   flex-direction: column;
+  overflow: hidden; /* Lock the viewport */
   position: relative;
   background-color: var(--bg);
-  box-shadow: 0 0 50px rgba(0, 0, 0, 0.4);
+  border-left: 1px solid var(--surface-border-subtle);
+  border-right: 1px solid var(--surface-border-subtle);
 }
 
-/* Scrollbar */
-::-webkit-scrollbar {
-  width: 5px;
+/* Custom minimal scrollbar for the scrollable trucks area */
+.scroll-area {
+  flex: 1;
+  overflow-y: auto;
+  overflow-x: hidden;
+  -webkit-overflow-scrolling: touch;
+  overscroll-behavior: contain;
 }
-::-webkit-scrollbar-track {
+
+.scroll-area::-webkit-scrollbar {
+  width: 4px;
+}
+.scroll-area::-webkit-scrollbar-track {
   background: transparent;
 }
-::-webkit-scrollbar-thumb {
-  background: var(--surface-border);
+.scroll-area::-webkit-scrollbar-thumb {
+  background: #d1d5db;
   border-radius: 4px;
-}
-
-/* Animations */
-@keyframes popIn {
-  from { opacity: 0; transform: scale(0.96) translateY(6px); }
-  to { opacity: 1; transform: scale(1) translateY(0); }
-}
-
-@keyframes pulse {
-  0%, 100% { opacity: 1; }
-  50% { opacity: 0.5; }
-}
-
-.animate-pop {
-  animation: popIn 0.2s cubic-bezier(0.16, 1, 0.3, 1) forwards;
 }
 
 .mono {
   font-family: 'JetBrains Mono', monospace;
+}
+
+/* Touch active micro-animations */
+button:active {
+  transform: scale(0.98);
 }
