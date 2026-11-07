@@ -19,29 +19,35 @@ CREATE TABLE IF NOT EXISTS public.trucks (
     UNIQUE (work_date, plate, country)
 );
 
--- 2. Indexes for fast queries
+-- 2. Fast search indexes
 CREATE INDEX IF NOT EXISTS idx_trucks_work_date ON public.trucks(work_date);
 CREATE INDEX IF NOT EXISTS idx_trucks_plate ON public.trucks(plate);
 
 -- 3. Enable Row Level Security (RLS)
 ALTER TABLE public.trucks ENABLE ROW LEVEL SECURITY;
 
--- 4. Allow public / anon read, insert, update, delete for worker app
-CREATE POLICY "Allow anon read" ON public.trucks 
-    FOR SELECT USING (true);
+-- 4. Clean up any previous policies
+DROP POLICY IF EXISTS "Allow anon read" ON public.trucks;
+DROP POLICY IF EXISTS "Allow anon insert" ON public.trucks;
+DROP POLICY IF EXISTS "Allow anon update" ON public.trucks;
+DROP POLICY IF EXISTS "Allow anon delete" ON public.trucks;
 
-CREATE POLICY "Allow anon insert" ON public.trucks 
-    FOR INSERT WITH CHECK (true);
+-- 5. Allow worker app full read/write access
+CREATE POLICY "Allow anon read" ON public.trucks FOR SELECT USING (true);
+CREATE POLICY "Allow anon insert" ON public.trucks FOR INSERT WITH CHECK (true);
+CREATE POLICY "Allow anon update" ON public.trucks FOR UPDATE USING (true);
+CREATE POLICY "Allow anon delete" ON public.trucks FOR DELETE USING (true);
 
-CREATE POLICY "Allow anon update" ON public.trucks 
-    FOR UPDATE USING (true);
+-- 6. Enable Realtime live sync across all worker phones
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_publication_tables 
+    WHERE pubname = 'supabase_realtime' AND tablename = 'trucks'
+  ) THEN
+    ALTER PUBLICATION supabase_realtime ADD TABLE public.trucks;
+  END IF;
+END $$;
 
-CREATE POLICY "Allow anon delete" ON public.trucks 
-    FOR DELETE USING (true);
-
--- 5. Enable Realtime updates across all worker phones!
-ALTER PUBLICATION supabase_realtime ADD TABLE public.trucks;
-
--- Verify setup
-SELECT 'Gate Tracker database setup complete! All 6 workers can sync in real time.' AS status;
-
+-- 7. Confirm success
+SELECT 'Gate Tracker table created successfully!' AS result;
