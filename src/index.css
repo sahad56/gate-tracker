@@ -1,0 +1,107 @@
+@import url('https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&family=JetBrains+Mono:wght@500;600&display=swap');
+
+:root {
+  --bg: #090a0d;
+  --surface: #14161b;
+  --surface-raised: #1c1f26;
+  --surface-border: #282c37;
+  --text-main: #f4f5f8;
+  --text-muted: #8b92a2;
+  --text-sub: #5d6474;
+  
+  --accent-gate1: #2563eb;
+  --accent-gate1-active: #3b82f6;
+  --accent-gate2: #059669;
+  --accent-gate2-active: #10b981;
+  
+  --badge-omn: #d97706;
+  --badge-dxb: #3b82f6;
+  
+  --btn-calc-num: #222630;
+  --btn-calc-num-active: #2e3442;
+  --btn-calc-fn: #2b303d;
+  --btn-calc-action: #f4f5f8;
+  --btn-calc-action-text: #090a0d;
+
+  --safe-top: env(safe-area-inset-top, 0px);
+  --safe-bottom: env(safe-area-inset-bottom, 0px);
+}
+
+[data-theme="light"] {
+  --bg: #eceff3;
+  --surface: #ffffff;
+  --surface-raised: #f5f7fa;
+  --surface-border: #dbe0e8;
+  --text-main: #11141a;
+  --text-muted: #5e6676;
+  --text-sub: #8c95a6;
+  
+  --btn-calc-num: #e2e6ed;
+  --btn-calc-num-active: #d1d7e2;
+  --btn-calc-fn: #d8dde7;
+  --btn-calc-action: #11141a;
+  --btn-calc-action-text: #ffffff;
+}
+
+* {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+  -webkit-tap-highlight-color: transparent;
+}
+
+body {
+  background-color: var(--bg);
+  color: var(--text-main);
+  font-family: 'Plus Jakarta Sans', system-ui, -apple-system, sans-serif;
+  min-height: 100vh;
+  min-height: 100dvh;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  overflow-x: hidden;
+  user-select: none;
+}
+
+#root {
+  width: 100%;
+  max-width: 500px;
+  min-height: 100vh;
+  min-height: 100dvh;
+  display: flex;
+  flex-direction: column;
+  position: relative;
+  background-color: var(--bg);
+  box-shadow: 0 0 50px rgba(0, 0, 0, 0.4);
+}
+
+/* Scrollbar */
+::-webkit-scrollbar {
+  width: 5px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: var(--surface-border);
+  border-radius: 4px;
+}
+
+/* Animations */
+@keyframes popIn {
+  from { opacity: 0; transform: scale(0.96) translateY(6px); }
+  to { opacity: 1; transform: scale(1) translateY(0); }
+}
+
+@keyframes pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.5; }
+}
+
+.animate-pop {
+  animation: popIn 0.2s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+}
+
+.mono {
+  font-family: 'JetBrains Mono', monospace;
+}
