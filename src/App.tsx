@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { 
   Truck, Check, Lock, Copy, Plus, Upload, Search, 
-  LogOut, Settings, Database, X, User, AlertCircle
+  LogOut, Trash2, X, User, AlertCircle
 } from 'lucide-react';
 import { supabase, isSupabaseConfigured, WORKERS, WORKER_PASSWORD } from './supabase';
 import type { TruckItem } from './supabase';
@@ -23,21 +23,20 @@ export function App() {
   const [search, setSearch] = useState<string>('');
   const [toastMsg, setToastMsg] = useState<string>('');
 
+  // Option B: Worker filter and tabs
+  const [tab, setTab] = useState<'all' | 'my'>('all');
+  const [workerFilter, setWorkerFilter] = useState<string>('all');
+
   // 3. UI modals
   const [showAdd, setShowAdd] = useState<boolean>(false);
-  const [showSettings, setShowSettings] = useState<boolean>(false);
   const [showUploadModal, setShowUploadModal] = useState<boolean>(false);
   const [deleteConfirmId, setDeleteConfirmId] = useState<string | null>(null);
+  const [clearConfirm, setClearConfirm] = useState<boolean>(false);
 
   // New truck form
   const [newPlate, setNewPlate] = useState<string>('');
   const [newCountry, setNewCountry] = useState<'OMN' | 'DXB'>('OMN');
   const [newDriver, setNewDriver] = useState<string>('');
-
-  // Settings
-  const [sbUrl, setSbUrl] = useState<string>(() => localStorage.getItem('gt_supabase_url') || '');
-  const [sbKey, setSbKey] = useState<string>(() => localStorage.getItem('gt_supabase_anon_key') || '');
-  const [geminiKey, setGeminiKey] = useState<string>(() => localStorage.getItem('gt_gemini_key') || '');
 
   // File upload
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -89,6 +88,27 @@ export function App() {
     setCurrentWorker(null);
   };
 
+  // Helper to test if a truck belongs to current worker
+  const isTruckMine = (t: TruckItem) => {
+    if (!currentWorker) return false;
+    return (
+      t.gate1_by === currentWorker ||
+      t.gate2_by === currentWorker ||
+      t.created_by === currentWorker ||
+      (t.driver && t.driver.toLowerCase().includes(currentWorker.toLowerCase()))
+    );
+  };
+
+  // Helper to test if a truck belongs to a specific worker
+  const isTruckWorker = (t: TruckItem, w: string) => {
+    return (
+      t.gate1_by === w ||
+      t.gate2_by === w ||
+      t.created_by === w ||
+      (t.driver && t.driver.toLowerCase().includes(w.toLowerCase()))
+    );
+  };
+
   // Load trucks for the selected date
   const loadTrucks = async () => {
     if (isSupabaseConfigured && supabase) {
@@ -103,10 +123,9 @@ export function App() {
         setTrucks(data || []);
       } catch (err: any) {
         console.error('Supabase fetch error:', err);
-        showToast('Sync error: ' + (err.message || 'Check credentials'));
+        showToast('Sync error: ' + (err.message || 'Check connection'));
       }
     } else {
-      // Local storage fallback
       const saved = localStorage.getItem(`gt_trucks_${date}`);
       if (saved) {
         try {
@@ -115,59 +134,7 @@ export function App() {
           setTrucks([]);
         }
       } else {
-        // Initial sample trucks
-        const initialSamples: TruckItem[] = [
-          {
-            id: 'demo-1',
-            work_date: date,
-            plate: '3187YB',
-            country: 'OMN',
-            driver: 'Salim Al-Harthy',
-            gate1_at: new Date().toISOString(),
-            gate1_by: 'worker1',
-            gate2_at: new Date().toISOString(),
-            gate2_by: 'worker2',
-            pcs: 7,
-          },
-          {
-            id: 'demo-2',
-            work_date: date,
-            plate: '39263',
-            country: 'DXB',
-            driver: 'Rashid Khan',
-            gate1_at: new Date().toISOString(),
-            gate1_by: 'worker1',
-            gate2_at: new Date().toISOString(),
-            gate2_by: 'worker3',
-            pcs: 7,
-          },
-          {
-            id: 'demo-3',
-            work_date: date,
-            plate: '81852',
-            country: 'DXB',
-            driver: 'Mohammed Tariq',
-            gate1_at: new Date().toISOString(),
-            gate1_by: 'worker2',
-            gate2_at: null,
-            gate2_by: null,
-            pcs: 14,
-          },
-          {
-            id: 'demo-4',
-            work_date: date,
-            plate: '745612',
-            country: 'OMN',
-            driver: 'Nasir Ahmed',
-            gate1_at: null,
-            gate1_by: null,
-            gate2_at: null,
-            gate2_by: null,
-            pcs: null,
-          }
-        ];
-        setTrucks(initialSamples);
-        localStorage.setItem(`gt_trucks_${date}`, JSON.stringify(initialSamples));
+        setTrucks([]);
       }
     }
   };
@@ -231,7 +198,6 @@ export function App() {
     let updated: TruckItem;
 
     if (isChecked) {
-      // Unticking Gate 1 resets both Gate 1 AND Gate 2!
       updated = {
         ...t,
         gate1_at: null,
@@ -312,12 +278,17 @@ export function App() {
       return;
     }
 
+    const workerTag = currentWorker || 'worker1';
+    const driverString = newDriver.trim() 
+      ? `${newDriver.trim()} · ${workerTag}` 
+      : workerTag;
+
     const newTruckData: TruckItem = {
       id: isSupabaseConfigured ? (crypto.randomUUID ? crypto.randomUUID() : `id-${Date.now()}`) : `t-${Date.now()}`,
       work_date: date,
       plate: cleanPlate,
       country: newCountry,
-      driver: newDriver.trim() || undefined,
+      driver: driverString,
       gate1_at: null,
       gate1_by: null,
       gate2_at: null,
@@ -346,10 +317,10 @@ export function App() {
     setNewPlate('');
     setNewDriver('');
     setShowAdd(false);
-    showToast(`✓ Added ${cleanPlate}`);
+    showToast(`✓ Added ${cleanPlate} (${workerTag})`);
   };
 
-  // Delete truck
+  // Delete single truck
   const handleDeleteTruck = async (id: string) => {
     if (deleteConfirmId !== id) {
       setDeleteConfirmId(id);
@@ -377,12 +348,41 @@ export function App() {
     showToast('Truck removed');
   };
 
+  // Clear all trucks for this day (when day is done)
+  const handleClearDay = async () => {
+    if (!clearConfirm) {
+      setClearConfirm(true);
+      setTimeout(() => setClearConfirm(false), 3500);
+      return;
+    }
+
+    if (isSupabaseConfigured && supabase) {
+      try {
+        const { error } = await supabase.from('trucks').delete().eq('work_date', date);
+        if (error) throw error;
+      } catch (err: any) {
+        showToast('Clear error: ' + err.message);
+        return;
+      }
+    }
+
+    setTrucks([]);
+    localStorage.removeItem(`gt_trucks_${date}`);
+    broadcastRef.current?.postMessage({ type: 'TRUCKS_UPDATED' });
+    setClearConfirm(false);
+    showToast('All trucks cleared for this date');
+  };
+
   // Format and copy day report
-  const copyDayReport = () => {
-    const loadedTrucks = trucks.filter((t) => Boolean(t.gate2_at));
+  const copyDayReport = (onlyMine: boolean = false) => {
+    let sourceTrucks = trucks;
+    if (onlyMine) {
+      sourceTrucks = sourceTrucks.filter(isTruckMine);
+    }
+    const loadedTrucks = sourceTrucks.filter((t) => Boolean(t.gate2_at));
 
     if (loadedTrucks.length === 0) {
-      showToast('No loaded trucks (Gate 2) yet!');
+      showToast(onlyMine ? 'No loaded trucks for you yet!' : 'No loaded trucks (Gate 2) yet!');
       return;
     }
 
@@ -397,25 +397,27 @@ export function App() {
 
     const reportText = `${formattedDate}\n\nKIZAD-CC\n\n${truckLines.join('\n')}\n\nLOADED`;
 
+    const label = onlyMine ? `My (${loadedTrucks.length})` : `All (${loadedTrucks.length})`;
+
     if (navigator.clipboard && navigator.clipboard.writeText) {
       navigator.clipboard.writeText(reportText).then(() => {
-        showToast(`📋 Copied ${loadedTrucks.length} trucks report!`);
+        showToast(`📋 Copied ${label} report!`);
       }).catch(() => {
-        fallbackCopy(reportText, loadedTrucks.length);
+        fallbackCopy(reportText, label);
       });
     } else {
-      fallbackCopy(reportText, loadedTrucks.length);
+      fallbackCopy(reportText, label);
     }
   };
 
-  const fallbackCopy = (text: string, count: number) => {
+  const fallbackCopy = (text: string, label: string) => {
     const el = document.createElement('textarea');
     el.value = text;
     document.body.appendChild(el);
     el.select();
     try {
       document.execCommand('copy');
-      showToast(`📋 Copied ${count} trucks report!`);
+      showToast(`📋 Copied ${label} report!`);
     } catch {
       showToast('Copy blocked by browser');
     }
@@ -423,10 +425,10 @@ export function App() {
   };
 
   // Parse text lines from image/doc
-  const parseAndAddRows = (rawText: string) => {
+  const parseAndAddRows = async (rawText: string) => {
     const lines = rawText.split('\n');
-    let addedCount = 0;
-    const newTrucksList = [...trucks];
+    const workerTag = currentWorker || 'worker1';
+    const toInsert: TruckItem[] = [];
 
     for (const line of lines) {
       const trimmed = line.trim();
@@ -439,30 +441,46 @@ export function App() {
       if (!cleanMatch) continue;
       const plate = cleanMatch[0].toUpperCase();
 
-      const already = newTrucksList.some(
+      const already = trucks.some(
+        (t) => t.plate.toUpperCase() === plate && t.country === country
+      ) || toInsert.some(
         (t) => t.plate.toUpperCase() === plate && t.country === country
       );
       if (already) continue;
 
-      newTrucksList.push({
-        id: `t-${Date.now()}-${Math.random().toString(36).substr(2, 5)}`,
+      toInsert.push({
+        id: isSupabaseConfigured ? (crypto.randomUUID ? crypto.randomUUID() : `id-${Date.now()}-${Math.random()}`) : `t-${Date.now()}-${Math.random()}`,
         work_date: date,
         plate: plate,
         country: country,
+        driver: workerTag,
         gate1_at: null,
         gate1_by: null,
         gate2_at: null,
         gate2_by: null,
         pcs: null,
       });
-      addedCount++;
     }
 
-    if (addedCount > 0) {
-      setTrucks(newTrucksList);
-      localStorage.setItem(`gt_trucks_${date}`, JSON.stringify(newTrucksList));
-      broadcastRef.current?.postMessage({ type: 'TRUCKS_UPDATED' });
-      showToast(`Added ${addedCount} trucks!`);
+    if (toInsert.length > 0) {
+      if (isSupabaseConfigured && supabase) {
+        try {
+          const { data, error } = await supabase.from('trucks').insert(toInsert).select();
+          if (error) throw error;
+          if (data) {
+            setTrucks((prev) => [...prev, ...data]);
+          }
+        } catch (err: any) {
+          showToast('Supabase insert: ' + err.message);
+          return;
+        }
+      } else {
+        const next = [...trucks, ...toInsert];
+        setTrucks(next);
+        localStorage.setItem(`gt_trucks_${date}`, JSON.stringify(next));
+        broadcastRef.current?.postMessage({ type: 'TRUCKS_UPDATED' });
+      }
+      showToast(`Added ${toInsert.length} trucks for ${workerTag}!`);
     } else {
       showToast('No new trucks found in text.');
     }
@@ -476,7 +494,7 @@ export function App() {
     setParsingImage(true);
     showToast('Analyzing image photo…');
 
-    const apiKey = geminiKey || import.meta.env.VITE_GEMINI_API_KEY;
+    const apiKey = import.meta.env.VITE_GEMINI_API_KEY;
 
     if (apiKey) {
       try {
@@ -512,7 +530,7 @@ export function App() {
           const result = await response.json();
           const generatedText = result.candidates?.[0]?.content?.parts?.[0]?.text || '';
           if (generatedText) {
-            parseAndAddRows(generatedText);
+            await parseAndAddRows(generatedText);
           } else {
             showToast('Could not extract text');
           }
@@ -528,35 +546,45 @@ export function App() {
     }
   };
 
-  // Save Settings
-  const handleSaveSettings = () => {
-    localStorage.setItem('gt_supabase_url', sbUrl.trim());
-    localStorage.setItem('gt_supabase_anon_key', sbKey.trim());
-    localStorage.setItem('gt_gemini_key', geminiKey.trim());
-    setShowSettings(false);
-    showToast('Saved! Reloading…');
-    setTimeout(() => window.location.reload(), 400);
-  };
-
-  // Filter trucks by search
+  // Filter trucks by search, tab (All vs My), and worker filter
   const filteredTrucks = useMemo(() => {
-    if (!search.trim()) return trucks;
-    const q = search.toLowerCase();
-    return trucks.filter(
-      (t) =>
-        t.plate.toLowerCase().includes(q) ||
-        (t.driver && t.driver.toLowerCase().includes(q)) ||
-        t.country.toLowerCase().includes(q)
-    );
-  }, [trucks, search]);
+    let list = trucks;
+
+    // Tab filter
+    if (tab === 'my') {
+      list = list.filter(isTruckMine);
+    }
+
+    // Specific worker dropdown filter
+    if (workerFilter !== 'all') {
+      list = list.filter((t) => isTruckWorker(t, workerFilter));
+    }
+
+    // Search query
+    if (search.trim()) {
+      const q = search.toLowerCase();
+      list = list.filter(
+        (t) =>
+          t.plate.toLowerCase().includes(q) ||
+          (t.driver && t.driver.toLowerCase().includes(q)) ||
+          t.country.toLowerCase().includes(q)
+      );
+    }
+
+    return list;
+  }, [trucks, tab, workerFilter, search, currentWorker]);
 
   // Counters
   const sTotal = trucks.length;
   const sGate1 = trucks.filter((t) => Boolean(t.gate1_at)).length;
   const sLoaded = trucks.filter((t) => Boolean(t.gate2_at)).length;
 
+  const myTrucksList = useMemo(() => trucks.filter(isTruckMine), [trucks, currentWorker]);
+  const sMyTotal = myTrucksList.length;
+  const sMyLoaded = myTrucksList.filter((t) => Boolean(t.gate2_at)).length;
+
   // -------------------------------------------------------------------------
-  // LOGIN SCREEN (White Aesthetic)
+  // LOGIN SCREEN (Pure White Aesthetic - ZERO API keys shown to workers)
   // -------------------------------------------------------------------------
   if (!currentWorker) {
     return (
@@ -662,33 +690,12 @@ export function App() {
             </button>
           </form>
         </div>
-
-        <div style={{ textAlign: 'center', marginTop: '20px' }}>
-          <button
-            onClick={() => setShowSettings(true)}
-            style={{
-              background: 'none',
-              border: 'none',
-              color: '#6b7280',
-              fontSize: '12px',
-              fontWeight: 500,
-              display: 'inline-flex',
-              alignItems: 'center',
-              gap: '5px',
-              cursor: 'pointer'
-            }}
-          >
-            <Settings size={13} /> Supabase Settings
-          </button>
-        </div>
-
-        {showSettings && renderSettingsModal()}
       </div>
     );
   }
 
   // -------------------------------------------------------------------------
-  // MAIN DASHBOARD (White Aesthetic, Shredded Compact, Fixed Mobile Screen)
+  // MAIN DASHBOARD (Option B: All / My Trucks Filter, All Day Persistence)
   // -------------------------------------------------------------------------
   return (
     <div style={{ 
@@ -711,30 +718,33 @@ export function App() {
               </span>
               <span style={{ 
                 fontSize: '9px', fontWeight: 700, padding: '2px 6px', borderRadius: '6px', 
-                background: isSupabaseConfigured ? '#ecfdf5' : '#fef3c7',
-                color: isSupabaseConfigured ? '#059669' : '#d97706',
-                border: `1px solid ${isSupabaseConfigured ? '#a7f3d0' : '#fde68a'}`
+                background: '#ecfdf5', color: '#059669', border: '1px solid #a7f3d0'
               }}>
-                {isSupabaseConfigured ? 'Live' : 'Local'}
+                🟢 Live Cloud
               </span>
             </div>
             <div style={{ fontSize: '11px', color: '#6b7280', fontWeight: 500 }}>
-              KIZAD · CC
+              KIZAD · CC · <span style={{ fontWeight: 700, color: '#111827' }}>{currentWorker}</span>
             </div>
           </div>
 
           <div style={{ display: 'flex', alignItems: 'center', gap: '5px' }}>
+            {/* Clear All Day Button (After work is finished) */}
             <button
-              onClick={() => setShowSettings(true)}
-              title="Settings"
+              onClick={handleClearDay}
+              title="Clear all trucks for this date"
               style={{
-                width: '32px', height: '32px', borderRadius: '10px',
-                background: '#f3f4f6', border: '1px solid #e5e7eb',
-                color: '#4b5563', display: 'flex', alignItems: 'center', justifyContent: 'center',
+                height: '32px', padding: '0 8px', borderRadius: '10px',
+                background: clearConfirm ? '#fee2e2' : '#f3f4f6',
+                border: `1px solid ${clearConfirm ? '#fca5a5' : '#e5e7eb'}`,
+                color: clearConfirm ? '#dc2626' : '#6b7280',
+                fontSize: '11px', fontWeight: 700,
+                display: 'flex', alignItems: 'center', gap: '4px',
                 cursor: 'pointer'
               }}
             >
-              <Settings size={15} />
+              <Trash2 size={13} />
+              <span>{clearConfirm ? 'Clear all?' : 'Clear'}</span>
             </button>
 
             <button
@@ -847,7 +857,7 @@ export function App() {
             <div style={{ display: 'flex', gap: '5px' }}>
               <input
                 type="text"
-                placeholder="Driver (Optional)"
+                placeholder="Driver name (optional)"
                 value={newDriver}
                 onChange={(e) => setNewDriver(e.target.value)}
                 style={{
@@ -870,45 +880,96 @@ export function App() {
           </form>
         )}
 
+        {/* OPTION B: Filter Tabs (All Trucks vs My Trucks) */}
+        <div style={{ display: 'flex', gap: '4px', marginTop: '8px', alignItems: 'center' }}>
+          <button
+            type="button"
+            onClick={() => { setTab('all'); setWorkerFilter('all'); }}
+            style={{
+              flex: 1, padding: '6px 4px', borderRadius: '8px', border: '1px solid',
+              borderColor: tab === 'all' && workerFilter === 'all' ? '#111827' : '#e5e7eb',
+              background: tab === 'all' && workerFilter === 'all' ? '#111827' : '#ffffff',
+              color: tab === 'all' && workerFilter === 'all' ? '#ffffff' : '#6b7280',
+              fontWeight: 700, fontSize: '11px', cursor: 'pointer'
+            }}
+          >
+            All Trucks ({sTotal})
+          </button>
+
+          <button
+            type="button"
+            onClick={() => { setTab('my'); setWorkerFilter('all'); }}
+            style={{
+              flex: 1, padding: '6px 4px', borderRadius: '8px', border: '1px solid',
+              borderColor: tab === 'my' ? '#2563eb' : '#e5e7eb',
+              background: tab === 'my' ? '#eff6ff' : '#ffffff',
+              color: tab === 'my' ? '#2563eb' : '#6b7280',
+              fontWeight: 700, fontSize: '11px', cursor: 'pointer'
+            }}
+          >
+            My Trucks ({sMyTotal})
+          </button>
+
+          {/* Worker Dropdown Filter */}
+          <select
+            value={workerFilter}
+            onChange={(e) => {
+              setWorkerFilter(e.target.value);
+              if (e.target.value !== 'all') setTab('all');
+            }}
+            style={{
+              padding: '6px 6px', borderRadius: '8px', border: '1px solid #e5e7eb',
+              background: workerFilter !== 'all' ? '#111827' : '#ffffff',
+              color: workerFilter !== 'all' ? '#ffffff' : '#4b5563',
+              fontWeight: 700, fontSize: '11px', outline: 'none', cursor: 'pointer'
+            }}
+          >
+            <option value="all">Worker: Any</option>
+            {WORKERS.map((w) => (
+              <option key={w} value={w}>{w}</option>
+            ))}
+          </select>
+        </div>
+
         {/* Compact Shredded Stats Pills */}
-        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: '6px', marginTop: '8px' }}>
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: '6px', marginTop: '6px' }}>
           <div style={{ 
-            background: '#eff6ff', borderRadius: '10px', padding: '6px', 
+            background: '#eff6ff', borderRadius: '10px', padding: '5px', 
             textAlign: 'center', border: '1px solid #dbeafe', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '6px'
           }}>
-            <span style={{ fontSize: '14px', fontWeight: 800, color: '#2563eb', fontFamily: 'JetBrains Mono' }}>
+            <span style={{ fontSize: '13px', fontWeight: 800, color: '#2563eb', fontFamily: 'JetBrains Mono' }}>
               {sGate1}
             </span>
             <span style={{ fontSize: '10px', fontWeight: 700, color: '#1e40af' }}>Gate 1</span>
           </div>
 
           <div style={{ 
-            background: '#ecfdf5', borderRadius: '10px', padding: '6px', 
+            background: '#ecfdf5', borderRadius: '10px', padding: '5px', 
             textAlign: 'center', border: '1px solid #a7f3d0', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '6px'
           }}>
-            <span style={{ fontSize: '14px', fontWeight: 800, color: '#059669', fontFamily: 'JetBrains Mono' }}>
+            <span style={{ fontSize: '13px', fontWeight: 800, color: '#059669', fontFamily: 'JetBrains Mono' }}>
               {sLoaded}
             </span>
             <span style={{ fontSize: '10px', fontWeight: 700, color: '#065f46' }}>Loaded</span>
           </div>
 
           <div style={{ 
-            background: '#f9fafb', borderRadius: '10px', padding: '6px', 
+            background: '#f9fafb', borderRadius: '10px', padding: '5px', 
             textAlign: 'center', border: '1px solid #e5e7eb', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '6px'
           }}>
-            <span style={{ fontSize: '14px', fontWeight: 800, color: '#111827', fontFamily: 'JetBrains Mono' }}>
-              {sTotal}
+            <span style={{ fontSize: '13px', fontWeight: 800, color: '#111827', fontFamily: 'JetBrains Mono' }}>
+              {filteredTrucks.length}
             </span>
-            <span style={{ fontSize: '10px', fontWeight: 700, color: '#6b7280' }}>Total</span>
+            <span style={{ fontSize: '10px', fontWeight: 700, color: '#6b7280' }}>Shown</span>
           </div>
         </div>
 
         {/* Slim Search Input */}
-        <div style={{ position: 'relative', marginTop: '8px' }}>
+        <div style={{ position: 'relative', marginTop: '6px' }}>
           <Search size={13} color="#9ca3af" style={{ position: 'absolute', left: '10px', top: '9px' }} />
           <input
             type="text"
-            placeholder="Search plate or driver…"
+            placeholder={tab === 'my' ? `Search ${currentWorker}'s trucks…` : 'Search plate or driver…'}
             value={search}
             onChange={(e) => setSearch(e.target.value)}
             style={{
@@ -945,9 +1006,13 @@ export function App() {
             textAlign: 'center', border: '1px dashed #e5e7eb', marginTop: '10px' 
           }}>
             <Truck size={30} color="#9ca3af" style={{ margin: '0 auto 8px' }} />
-            <p style={{ color: '#111827', fontWeight: 700, fontSize: '13px' }}>No trucks for this date</p>
+            <p style={{ color: '#111827', fontWeight: 700, fontSize: '13px' }}>
+              {tab === 'my' ? `No trucks for ${currentWorker}` : 'No trucks found'}
+            </p>
             <p style={{ color: '#6b7280', fontSize: '11px', marginTop: '2px' }}>
-              Tap "Photo" or "+ Truck" above
+              {tab === 'my' 
+                ? 'Tap "+ Truck" to add your trucks, or switch to "All Trucks"' 
+                : 'Tap "Photo" or "+ Truck" above'}
             </p>
           </div>
         ) : (
@@ -955,6 +1020,7 @@ export function App() {
             {filteredTrucks.map((t) => {
               const isG1 = Boolean(t.gate1_at);
               const isG2 = Boolean(t.gate2_at);
+              const mine = isTruckMine(t);
 
               return (
                 <div
@@ -967,12 +1033,14 @@ export function App() {
                       ? '1px solid #a7f3d0' 
                       : isG1 
                       ? '1px solid #bfdbfe' 
+                      : mine
+                      ? '1px solid #dbeafe'
                       : '1px solid #e5e7eb',
                     boxShadow: '0 1px 2px rgba(0,0,0,0.03)',
                     transition: 'border-color 0.15s ease'
                   }}
                 >
-                  {/* Row 1: Plate, Country tag, Loaded badge, Driver, Delete */}
+                  {/* Row 1: Plate, Country tag, Loaded badge, Driver/Owner, Delete */}
                   <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '7px' }}>
                     <div style={{ display: 'flex', alignItems: 'center', gap: '6px', flexWrap: 'wrap' }}>
                       <span style={{ 
@@ -1008,9 +1076,13 @@ export function App() {
                         </span>
                       )}
 
+                      {/* Driver & Worker Owner tag */}
                       {t.driver && (
-                        <span style={{ fontSize: '11px', color: '#6b7280', fontWeight: 500, marginLeft: '2px' }}>
-                          · {t.driver}
+                        <span style={{ 
+                          fontSize: '10px', color: '#4b5563', fontWeight: 600,
+                          background: '#f3f4f6', padding: '1px 6px', borderRadius: '5px' 
+                        }}>
+                          {t.driver}
                         </span>
                       )}
                     </div>
@@ -1134,7 +1206,7 @@ export function App() {
         )}
       </main>
 
-      {/* 3. FIXED BOTTOM BAR (Floating Dock with Copy Report) */}
+      {/* 3. FIXED BOTTOM BAR (Copy Report: My Report vs All Report) */}
       <footer
         style={{
           position: 'absolute',
@@ -1145,34 +1217,87 @@ export function App() {
           background: 'linear-gradient(to top, #ffffff 75%, rgba(255, 255, 255, 0))',
           display: 'flex',
           justifyContent: 'center',
+          gap: '8px',
           pointerEvents: 'none',
           zIndex: 40
         }}
       >
         <button
-          onClick={copyDayReport}
+          onClick={() => copyDayReport(tab === 'my')}
           style={{
-            width: '100%',
-            maxWidth: '460px',
+            flex: 2,
+            maxWidth: '320px',
             padding: '13px',
             borderRadius: '14px',
             border: 'none',
             background: '#111827',
             color: '#ffffff',
-            fontSize: '14px',
+            fontSize: '13px',
             fontWeight: 800,
             cursor: 'pointer',
             display: 'flex',
             alignItems: 'center',
             justifyContent: 'center',
-            gap: '7px',
+            gap: '6px',
             boxShadow: '0 4px 12px rgba(0, 0, 0, 0.15)',
             pointerEvents: 'auto'
           }}
         >
-          <Copy size={16} />
-          Copy Day Report ({sLoaded} Loaded)
+          <Copy size={15} />
+          {tab === 'my' 
+            ? `Copy My Report (${sMyLoaded})` 
+            : `Copy Report (${sLoaded} Loaded)`}
         </button>
+
+        {tab === 'my' ? (
+          <button
+            onClick={() => copyDayReport(false)}
+            title="Copy all site loaded trucks"
+            style={{
+              flex: 1,
+              maxWidth: '120px',
+              padding: '13px 8px',
+              borderRadius: '14px',
+              border: '1px solid #e5e7eb',
+              background: '#ffffff',
+              color: '#111827',
+              fontSize: '12px',
+              fontWeight: 700,
+              cursor: 'pointer',
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              gap: '4px',
+              pointerEvents: 'auto'
+            }}
+          >
+            All ({sLoaded})
+          </button>
+        ) : (
+          <button
+            onClick={() => copyDayReport(true)}
+            title="Copy only my loaded trucks"
+            style={{
+              flex: 1,
+              maxWidth: '120px',
+              padding: '13px 8px',
+              borderRadius: '14px',
+              border: '1px solid #e5e7eb',
+              background: '#ffffff',
+              color: '#111827',
+              fontSize: '12px',
+              fontWeight: 700,
+              cursor: 'pointer',
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              gap: '4px',
+              pointerEvents: 'auto'
+            }}
+          >
+            Mine ({sMyLoaded})
+          </button>
+        )}
       </footer>
 
       {/* Toast Notification */}
@@ -1239,7 +1364,7 @@ export function App() {
                   border: 'none', fontWeight: 700, fontSize: '12px', cursor: 'pointer'
                 }}
               >
-                Add Trucks
+                Add Trucks ({currentWorker})
               </button>
               <button
                 onClick={() => setShowUploadModal(false)}
@@ -1255,117 +1380,7 @@ export function App() {
           </div>
         </div>
       )}
-
-      {/* Settings Modal */}
-      {showSettings && renderSettingsModal()}
     </div>
   );
-
-  // Settings Modal
-  function renderSettingsModal() {
-    return (
-      <div style={{
-        position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.5)',
-        display: 'flex', alignItems: 'center', justifyContent: 'center',
-        padding: '16px', zIndex: 100
-      }}>
-        <div style={{
-          background: '#ffffff', borderRadius: '20px', padding: '20px',
-          width: '100%', maxWidth: '400px', border: '1px solid #e5e7eb',
-          boxShadow: '0 10px 25px rgba(0,0,0,0.1)'
-        }}>
-          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '12px' }}>
-            <h3 style={{ fontSize: '16px', fontWeight: 800, display: 'flex', alignItems: 'center', gap: '6px' }}>
-              <Database size={17} /> Supabase Settings
-            </h3>
-            <button
-              onClick={() => setShowSettings(false)}
-              style={{ background: 'none', border: 'none', color: '#9ca3af', cursor: 'pointer' }}
-            >
-              <X size={18} />
-            </button>
-          </div>
-
-          <p style={{ fontSize: '11px', color: '#6b7280', marginBottom: '14px', lineHeight: 1.4 }}>
-            Enter your free Supabase keys below to sync all 6 workers on different phones in real time:
-          </p>
-
-          <div style={{ marginBottom: '10px' }}>
-            <label style={{ display: 'block', fontSize: '11px', fontWeight: 600, marginBottom: '4px' }}>
-              Supabase URL
-            </label>
-            <input
-              type="text"
-              placeholder="https://xyz.supabase.co"
-              value={sbUrl}
-              onChange={(e) => setSbUrl(e.target.value)}
-              style={{
-                width: '100%', padding: '9px 10px', borderRadius: '10px',
-                background: '#f9fafb', border: '1px solid #e5e7eb',
-                color: '#111827', fontSize: '12px', outline: 'none'
-              }}
-            />
-          </div>
-
-          <div style={{ marginBottom: '10px' }}>
-            <label style={{ display: 'block', fontSize: '11px', fontWeight: 600, marginBottom: '4px' }}>
-              Supabase Anon Key
-            </label>
-            <input
-              type="password"
-              placeholder="eyJhbGci..."
-              value={sbKey}
-              onChange={(e) => setSbKey(e.target.value)}
-              style={{
-                width: '100%', padding: '9px 10px', borderRadius: '10px',
-                background: '#f9fafb', border: '1px solid #e5e7eb',
-                color: '#111827', fontSize: '12px', outline: 'none'
-              }}
-            />
-          </div>
-
-          <div style={{ marginBottom: '16px' }}>
-            <label style={{ display: 'block', fontSize: '11px', fontWeight: 600, marginBottom: '4px' }}>
-              Gemini Key (Optional for photo OCR)
-            </label>
-            <input
-              type="password"
-              placeholder="AIzaSy..."
-              value={geminiKey}
-              onChange={(e) => setGeminiKey(e.target.value)}
-              style={{
-                width: '100%', padding: '9px 10px', borderRadius: '10px',
-                background: '#f9fafb', border: '1px solid #e5e7eb',
-                color: '#111827', fontSize: '12px', outline: 'none'
-              }}
-            />
-          </div>
-
-          <div style={{ display: 'flex', gap: '6px' }}>
-            <button
-              onClick={handleSaveSettings}
-              style={{
-                flex: 1, padding: '10px', borderRadius: '10px',
-                background: '#111827', color: '#ffffff',
-                border: 'none', fontWeight: 700, fontSize: '12px', cursor: 'pointer'
-              }}
-            >
-              Save & Connect
-            </button>
-            <button
-              onClick={() => setShowSettings(false)}
-              style={{
-                padding: '10px 14px', borderRadius: '10px',
-                background: '#f3f4f6', color: '#374151',
-                border: '1px solid #e5e7eb', fontWeight: 600, fontSize: '12px', cursor: 'pointer'
-              }}
-            >
-              Close
-            </button>
-          </div>
-        </div>
-      </div>
-    );
-  }
 }
 export default App;
