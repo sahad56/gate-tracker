@@ -1,8 +1,10 @@
 import React, { useState, useEffect, useMemo } from 'react';
 import { 
   Truck, Check, Lock, Copy, Plus, Search, 
-  LogOut, X, AlertCircle, Phone, Clock
+  LogOut, X, AlertCircle, Phone, Clock, Download
 } from 'lucide-react';
+import jsPDF from 'jspdf';
+import autoTable from 'jspdf-autotable';
 import { supabase, getEmailPrefix } from './supabase';
 import type { TruckItem } from './supabase';
 
@@ -688,6 +690,134 @@ export function App() {
     el.remove();
   };
 
+  // Download PDF Report with all truck details (Plate, Country, Driver, Phone, Gate 1, Gate 2, Wait time, PC, Owner)
+  const downloadPdfReport = () => {
+    if (trucks.length === 0) {
+      showToast('No trucks for this day to download');
+      return;
+    }
+
+    try {
+      const doc = new jsPDF({ orientation: 'landscape', unit: 'mm', format: 'a4' });
+
+      // Title & Header info
+      const [year, month, day] = date.split('-');
+      const formattedDate = `${day}-${month}-${year}`;
+
+      doc.setFontSize(15);
+      doc.setFont('helvetica', 'bold');
+      doc.setTextColor(17, 24, 39); // #111827
+      doc.text('GATE TRACKER — KIZAD CC DAILY REPORT', 14, 15);
+
+      doc.setFontSize(9.5);
+      doc.setFont('helvetica', 'normal');
+      doc.setTextColor(107, 114, 128); // #6b7280
+      doc.text(`Date: ${formattedDate}   |   Exported by: ${currentWorker} (${currentUserEmail})`, 14, 21);
+
+      // Summary Stats bar
+      doc.setFontSize(9);
+      doc.setFont('helvetica', 'bold');
+      doc.setTextColor(31, 41, 55);
+      const summaryText = `Total Trucks: ${sTotal}   •   Gate 1: ${sGate1}   •   Loaded (G2): ${sLoaded}   •   Avg Wait: ${avgWaitMin > 0 ? avgWaitMin + ' min' : '--'}`;
+      doc.setFillColor(243, 244, 246);
+      doc.roundedRect(14, 24, 269, 7, 2, 2, 'F');
+      doc.text(summaryText, 18, 28.5);
+
+      // Columns
+      const headers = [
+        ['#', 'Plate', 'Country', 'Driver Name', 'Phone Number', 'Gate 1 Time', 'Gate 2 (Loaded)', 'Duration / Wait', 'PC', ...(isAdmin ? ['Owner'] : [])]
+      ];
+
+      const rows = filteredTrucks.map((t, idx) => {
+        const isG1 = Boolean(t.gate1_at);
+        const isG2 = Boolean(t.gate2_at);
+        const g1Time = formatDubaiTime(t.gate1_at);
+        const g2Time = formatDubaiTime(t.gate2_at);
+
+        let g1Col = '--';
+        if (isG1) {
+          g1Col = g1Time + (t.gate1_by ? ` (${t.gate1_by})` : '');
+        }
+
+        let g2Col = '--';
+        if (isG2) {
+          g2Col = g2Time + (t.gate2_by ? ` (${t.gate2_by})` : '');
+        }
+
+        let durationCol = 'Pending';
+        if (isG1 && isG2) {
+          durationCol = `Took ${getMinutesDiff(t.gate1_at!, t.gate2_at!)} min`;
+        } else if (isG1 && !isG2) {
+          durationCol = `Waiting ${getMinutesDiff(t.gate1_at!)} min`;
+        }
+
+        const pcsText = t.pcs != null ? (t.pcs < 10 ? `0${t.pcs} PC` : `${t.pcs} PC`) : '--';
+
+        return [
+          String(idx + 1),
+          t.plate,
+          t.country,
+          t.driver || '--',
+          t.driver_phone || '--',
+          g1Col,
+          g2Col,
+          durationCol,
+          pcsText,
+          ...(isAdmin ? [t.owner_name || '--'] : [])
+        ];
+      });
+
+      autoTable(doc, {
+        head: headers,
+        body: rows,
+        startY: 34,
+        styles: {
+          fontSize: 8.5,
+          cellPadding: 2.2,
+          textColor: [17, 24, 39],
+          lineColor: [229, 231, 235],
+          lineWidth: 0.2,
+        },
+        headStyles: {
+          fillColor: [17, 24, 39],
+          textColor: [255, 255, 255],
+          fontStyle: 'bold',
+          halign: 'center',
+        },
+        alternateRowStyles: {
+          fillColor: [249, 250, 251],
+        },
+        columnStyles: {
+          0: { halign: 'center', cellWidth: 10 },
+          1: { fontStyle: 'bold', halign: 'center', cellWidth: 26 },
+          2: { halign: 'center', cellWidth: 18 },
+          3: { cellWidth: 38 },
+          4: { cellWidth: 32 },
+          5: { halign: 'center', cellWidth: 32 },
+          6: { halign: 'center', cellWidth: 34 },
+          7: { halign: 'center', cellWidth: 30 },
+          8: { halign: 'center', cellWidth: 18 },
+          ...(isAdmin ? { 9: { halign: 'center', cellWidth: 22 } } : {})
+        },
+        didDrawPage: (data) => {
+          doc.setFontSize(8);
+          doc.setTextColor(156, 163, 175);
+          doc.text(
+            `Gate Tracker · Page ${data.pageNumber}`,
+            14,
+            doc.internal.pageSize.height - 8
+          );
+        }
+      });
+
+      doc.save(`Gate_Tracker_Report_${formattedDate}.pdf`);
+      showToast('📥 Downloaded PDF Report!');
+    } catch (err: any) {
+      console.error('PDF error:', err);
+      showToast('PDF error: ' + (err.message || 'Could not create PDF'));
+    }
+  };
+
   // Filter trucks by search and admin worker filter (kenz only)
   const filteredTrucks = useMemo(() => {
     let list = trucks;
@@ -921,6 +1051,24 @@ export function App() {
           </div>
 
           <div style={{ display: 'flex', alignItems: 'center', gap: '5px' }}>
+            {/* Download PDF Report Button (on the left side of New day) */}
+            <button
+              onClick={downloadPdfReport}
+              title="Download Day Report PDF"
+              style={{
+                height: '32px', padding: '0 8px', borderRadius: '10px',
+                background: '#ffffff',
+                border: '1px solid #e5e7eb',
+                color: '#111827',
+                fontSize: '11px', fontWeight: 700,
+                display: 'flex', alignItems: 'center', gap: '4px',
+                cursor: 'pointer'
+              }}
+            >
+              <Download size={12} />
+              <span>PDF</span>
+            </button>
+
             {/* New Day Button */}
             <button
               onClick={handleNewDay}
