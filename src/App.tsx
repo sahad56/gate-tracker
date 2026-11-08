@@ -230,10 +230,27 @@ export function App() {
         .from('trucks')
         .select('*')
         .eq('work_date', date)
-        .order('created_at', { ascending: true });
+        .order('created_at', { ascending: true })
+        .order('id', { ascending: true });
 
       if (error) throw error;
-      setTrucks(data || []);
+      
+      setTrucks((prev) => {
+        if (!prev || prev.length === 0) return data || [];
+        const map = new Map((data || []).map((t) => [t.id, t]));
+        const serverIds = new Set((data || []).map((t) => t.id));
+        
+        // Keep existing trucks in their EXACT current positions, updating their attributes
+        const preserved = prev
+          .filter((t) => serverIds.has(t.id))
+          .map((t) => ({ ...t, ...(map.get(t.id) || {}) }));
+
+        // Append any newly added trucks at the end
+        const existingIds = new Set(prev.map((t) => t.id));
+        const newItems = (data || []).filter((t) => !existingIds.has(t.id));
+
+        return [...preserved, ...newItems];
+      });
     } catch (err: any) {
       console.error('Supabase fetch error:', err);
       showToast('Sync error: ' + (err.message || 'Check connection'));
@@ -242,6 +259,7 @@ export function App() {
 
   useEffect(() => {
     if (session) {
+      setTrucks([]);
       loadTrucks();
     }
   }, [date, session]);
@@ -255,8 +273,23 @@ export function App() {
       .on(
         'postgres_changes',
         { event: '*', schema: 'public', table: 'trucks' },
-        () => {
-          loadTrucks();
+        (payload) => {
+          if (payload.eventType === 'UPDATE' && payload.new) {
+            setTrucks((prev) =>
+              prev.map((item) => (item.id === payload.new.id ? { ...item, ...payload.new } : item))
+            );
+          } else if (payload.eventType === 'DELETE' && payload.old) {
+            setTrucks((prev) => prev.filter((item) => item.id !== (payload.old as any).id));
+          } else if (payload.eventType === 'INSERT' && payload.new) {
+            setTrucks((prev) => {
+              const newItem = payload.new as TruckItem;
+              if (newItem.work_date !== date) return prev;
+              if (prev.some((item) => item.id === newItem.id)) return prev;
+              return [...prev, newItem];
+            });
+          } else {
+            loadTrucks();
+          }
         }
       )
       .subscribe();
@@ -293,6 +326,15 @@ export function App() {
     if (timeoutId) clearTimeout(timeoutId);
     setUndoState(null);
 
+    // Optimistic in-place update (zero shuffle)
+    setTrucks((prev) =>
+      prev.map((item) =>
+        item.id === truckId
+          ? { ...item, gate1_at: prevGate1At, gate2_at: prevGate2At }
+          : item
+      )
+    );
+
     try {
       const { error } = await supabase
         .from('trucks')
@@ -304,7 +346,6 @@ export function App() {
 
       if (error) throw error;
       showToast('Action undone');
-      await loadTrucks();
     } catch (err: any) {
       showToast('Undo failed: ' + err.message);
     }
@@ -327,6 +368,13 @@ export function App() {
       actionLabel = `${t.plate}: Gate 1 ticked`;
     }
 
+    // Instant optimistic update in place (no position change)
+    setTrucks((prev) =>
+      prev.map((item) => (item.id === t.id ? { ...item, ...payload } : item))
+    );
+
+    triggerUndo(t.id, t.plate, prevGate1At, prevGate2At, actionLabel);
+
     try {
       const { error } = await supabase
         .from('trucks')
@@ -334,10 +382,13 @@ export function App() {
         .eq('id', t.id);
 
       if (error) throw error;
-
-      triggerUndo(t.id, t.plate, prevGate1At, prevGate2At, actionLabel);
-      await loadTrucks();
     } catch (err: any) {
+      // Revert if error
+      setTrucks((prev) =>
+        prev.map((item) =>
+          item.id === t.id ? { ...item, gate1_at: prevGate1At, gate2_at: prevGate2At } : item
+        )
+      );
       showToast('Error: ' + err.message);
     }
   };
@@ -358,6 +409,13 @@ export function App() {
     };
     const actionLabel = isChecked ? `${t.plate}: Gate 2 unticked` : `${t.plate}: Gate 2 ticked`;
 
+    // Instant optimistic update in place (no position change)
+    setTrucks((prev) =>
+      prev.map((item) => (item.id === t.id ? { ...item, ...payload } : item))
+    );
+
+    triggerUndo(t.id, t.plate, prevGate1At, prevGate2At, actionLabel);
+
     try {
       const { error } = await supabase
         .from('trucks')
@@ -365,10 +423,13 @@ export function App() {
         .eq('id', t.id);
 
       if (error) throw error;
-
-      triggerUndo(t.id, t.plate, prevGate1At, prevGate2At, actionLabel);
-      await loadTrucks();
     } catch (err: any) {
+      // Revert if error
+      setTrucks((prev) =>
+        prev.map((item) =>
+          item.id === t.id ? { ...item, gate2_at: prevGate2At } : item
+        )
+      );
       showToast('Error: ' + err.message);
     }
   };
@@ -379,6 +440,8 @@ export function App() {
     const num = isNaN(pcsVal as any) ? null : pcsVal;
     if (t.pcs === num) return;
 
+    setTrucks((prev) => prev.map((item) => (item.id === t.id ? { ...item, pcs: num } : item)));
+
     try {
       const { error } = await supabase
         .from('trucks')
@@ -386,7 +449,6 @@ export function App() {
         .eq('id', t.id);
 
       if (error) throw error;
-      setTrucks((prev) => prev.map((item) => (item.id === t.id ? { ...item, pcs: num } : item)));
     } catch (err: any) {
       showToast('PC save error: ' + err.message);
     }
@@ -396,6 +458,10 @@ export function App() {
   const handleDriverFieldsBlur = async (id: string, driver: string, driver_phone: string) => {
     const dVal = driver.trim() || null;
     const pVal = driver_phone.trim() || null;
+
+    setTrucks((prev) =>
+      prev.map((item) => (item.id === id ? { ...item, driver: dVal, driver_phone: pVal } : item))
+    );
 
     try {
       const { error } = await supabase
@@ -1163,24 +1229,28 @@ export function App() {
                   style={{
                     background: '#ffffff',
                     borderRadius: '13px',
-                    padding: '8px 9px',
+                    padding: '8px 10px',
                     border: isG2 
                       ? '1px solid #a7f3d0' 
                       : isG1 
                       ? '1px solid #bfdbfe' 
                       : '1px solid #e5e7eb',
                     boxShadow: '0 1px 2px rgba(0,0,0,0.02)',
+                    display: 'flex',
+                    flexDirection: 'column',
+                    gap: '6px'
                   }}
                 >
-                  {/* Row 1: Plate, Country tag, Loaded badge, Owner (kenz only), Wait time, Delete */}
-                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '5px' }}>
-                    <div style={{ display: 'flex', alignItems: 'center', gap: '5px', flexWrap: 'wrap' }}>
+                  {/* Row 1: Fixed height header (Plate + Country + Owner + Wait time pill + Delete) */}
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', height: '22px' }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '5px', minWidth: 0 }}>
                       <span style={{ 
                         fontFamily: 'JetBrains Mono, monospace', 
                         fontSize: '14px', 
                         fontWeight: 800, 
                         color: '#111827',
-                        letterSpacing: '0.3px'
+                        letterSpacing: '0.3px',
+                        whiteSpace: 'nowrap'
                       }}>
                         {t.plate}
                       </span>
@@ -1193,7 +1263,8 @@ export function App() {
                           borderRadius: '5px',
                           background: t.country === 'OMN' ? '#fef3c7' : '#dbeafe',
                           color: t.country === 'OMN' ? '#b45309' : '#1d4ed8',
-                          border: `1px solid ${t.country === 'OMN' ? '#fde68a' : '#bfdbfe'}`
+                          border: `1px solid ${t.country === 'OMN' ? '#fde68a' : '#bfdbfe'}`,
+                          whiteSpace: 'nowrap'
                         }}
                       >
                         {t.country}
@@ -1203,53 +1274,59 @@ export function App() {
                       {isAdmin && t.owner_name && (
                         <span style={{ 
                           fontSize: '9px', fontWeight: 700, padding: '1px 5px', borderRadius: '5px',
-                          background: '#f3f4f6', color: '#4b5563' 
+                          background: '#f3f4f6', color: '#4b5563',
+                          whiteSpace: 'nowrap'
                         }}>
                           👤 {t.owner_name}
                         </span>
                       )}
+                    </div>
 
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '5px' }}>
                       {/* Wait time pill */}
-                      {waitText && (
+                      {waitText ? (
                         <span style={{ 
                           fontSize: '9px', fontWeight: 700, padding: '1px 5px', borderRadius: '5px',
                           background: isG2 ? '#ecfdf5' : '#eff6ff', 
                           color: isG2 ? '#065f46' : '#1e40af',
-                          display: 'inline-flex', alignItems: 'center', gap: '3px'
+                          display: 'inline-flex', alignItems: 'center', gap: '3px',
+                          whiteSpace: 'nowrap'
                         }}>
                           <Clock size={10} />
                           {waitText}
                         </span>
-                      )}
-                    </div>
+                      ) : null}
 
-                    {/* Delete button */}
-                    <button
-                      onClick={() => handleDeleteTruck(t.id)}
-                      style={{
-                        background: deleteConfirmId === t.id ? '#fee2e2' : 'transparent',
-                        color: deleteConfirmId === t.id ? '#dc2626' : '#9ca3af',
-                        border: 'none',
-                        padding: '2px 5px',
-                        borderRadius: '6px',
-                        fontSize: '10px',
-                        fontWeight: 700,
-                        cursor: 'pointer'
-                      }}
-                    >
-                      {deleteConfirmId === t.id ? 'Sure?' : '✕'}
-                    </button>
+                      {/* Delete button */}
+                      <button
+                        onClick={() => handleDeleteTruck(t.id)}
+                        style={{
+                          background: deleteConfirmId === t.id ? '#fee2e2' : 'transparent',
+                          color: deleteConfirmId === t.id ? '#dc2626' : '#9ca3af',
+                          border: 'none',
+                          padding: '2px 5px',
+                          borderRadius: '6px',
+                          fontSize: '10px',
+                          fontWeight: 700,
+                          cursor: 'pointer'
+                        }}
+                      >
+                        {deleteConfirmId === t.id ? 'Sure?' : '✕'}
+                      </button>
+                    </div>
                   </div>
 
                   {/* Row 2: Driver Name input + Phone input with Call link */}
-                  <div style={{ display: 'grid', gridTemplateColumns: '1.4fr 1.2fr auto', gap: '5px', marginBottom: '6px', alignItems: 'center' }}>
+                  <div style={{ display: 'grid', gridTemplateColumns: '1.4fr 1.2fr 28px', gap: '5px', alignItems: 'center' }}>
                     <input
                       type="text"
+                      key={`d-${t.id}`}
                       defaultValue={t.driver || ''}
                       placeholder="Driver name"
                       onBlur={(e) => handleDriverFieldsBlur(t.id, e.target.value, t.driver_phone || '')}
                       style={{
-                        padding: '4px 7px',
+                        height: '28px',
+                        padding: '0 7px',
                         borderRadius: '7px',
                         background: '#f9fafb',
                         border: '1px solid #e5e7eb',
@@ -1262,11 +1339,13 @@ export function App() {
 
                     <input
                       type="tel"
+                      key={`p-${t.id}`}
                       defaultValue={t.driver_phone || ''}
                       placeholder="Phone"
                       onBlur={(e) => handleDriverFieldsBlur(t.id, t.driver || '', e.target.value)}
                       style={{
-                        padding: '4px 7px',
+                        height: '28px',
+                        padding: '0 7px',
                         borderRadius: '7px',
                         background: '#f9fafb',
                         border: '1px solid #e5e7eb',
@@ -1282,16 +1361,16 @@ export function App() {
                         href={`tel:${t.driver_phone}`}
                         title={`Call ${t.driver_phone}`}
                         style={{
-                          height: '24px', width: '26px',
+                          height: '28px', width: '28px',
                           display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
                           borderRadius: '6px', background: '#ecfdf5', border: '1px solid #a7f3d0',
-                          color: '#059669', textDecoration: 'none'
+                          color: '#059669', textDecoration: 'none', boxSizing: 'border-box'
                         }}
                       >
                         <Phone size={12} />
                       </a>
                     ) : (
-                      <span style={{ width: '26px' }} />
+                      <span style={{ width: '28px', height: '28px' }} />
                     )}
                   </div>
 
