@@ -88,6 +88,17 @@ html, body {
   font-family: 'JetBrains Mono', monospace;
 }
 
+/* Date input styling for all mobile viewports down to 360px */
+input[type="date"] {
+  width: 100%;
+  min-width: 0;
+  box-sizing: border-box;
+  appearance: none;
+  -webkit-appearance: none;
+  height: 34px;
+  border-radius: 10px;
+}
+
 /* Touch active micro-animations */
 button:active {
   transform: scale(0.98);

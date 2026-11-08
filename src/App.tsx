@@ -1,19 +1,109 @@
-import React, { useState, useEffect, useMemo, useRef } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
 import { 
-  Truck, Check, Lock, Copy, Plus, Upload, Search, 
-  LogOut, Trash2, X, User, AlertCircle
+  Truck, Check, Lock, Copy, Plus, Search, 
+  LogOut, X, AlertCircle, Phone, Clock
 } from 'lucide-react';
-import { supabase, isSupabaseConfigured, WORKERS, WORKER_PASSWORD } from './supabase';
+import { supabase, getEmailPrefix } from './supabase';
 import type { TruckItem } from './supabase';
 
+// Format ISO string to Dubai 24h time HH:mm
+function formatDubaiTime(isoString?: string | null): string {
+  if (!isoString) return '';
+  try {
+    const d = new Date(isoString);
+    return new Intl.DateTimeFormat('en-GB', {
+      timeZone: 'Asia/Dubai',
+      hour: '2-digit',
+      minute: '2-digit',
+      hour12: false,
+    }).format(d);
+  } catch {
+    return '';
+  }
+}
+
+// Calculate difference in minutes between two dates/ISOs
+function getMinutesDiff(startIso: string, endIso?: string | null): number {
+  try {
+    const start = new Date(startIso).getTime();
+    const end = endIso ? new Date(endIso).getTime() : Date.now();
+    return Math.max(0, Math.round((end - start) / 60000));
+  } catch {
+    return 0;
+  }
+}
+
+// Line parser according to Prompt B.5:
+// PLATE COUNTRY DRIVER NAME PHONE
+function parseTruckLine(line: string): {
+  plate: string;
+  country: 'OMN' | 'DXB';
+  driver: string | null;
+  driver_phone: string | null;
+} | null {
+  const trimmed = line.trim();
+  if (!trimmed) return null;
+  const lower = trimmed.toLowerCase();
+  if (lower.startsWith('plate') || lower.startsWith('kizad') || lower === 'loaded') return null;
+
+  // Split by tabs or spaces
+  const tokens = trimmed.split(/[\t\s]+/).filter(Boolean);
+  if (tokens.length === 0) return null;
+
+  // First token = plate (alphanumeric uppercase)
+  const plate = tokens[0].toUpperCase().replace(/[^0-9A-Z]/g, '');
+  if (!plate) return null;
+
+  // Second token = country (OMN or DXB, also accept OMN-8548 style)
+  let country: 'OMN' | 'DXB' = 'OMN';
+  let startIndex = 1;
+  if (tokens.length > 1) {
+    const t1 = tokens[1].toUpperCase();
+    if (t1.includes('DXB') || t1.includes('DUBAI')) {
+      country = 'DXB';
+      startIndex = 2;
+    } else if (t1.includes('OMN') || t1.includes('OMAN')) {
+      country = 'OMN';
+      startIndex = 2;
+    }
+  }
+
+  // Remaining tokens: driver name and optional phone
+  const remaining = tokens.slice(startIndex);
+  let driver_phone: string | null = null;
+  let driverTokens = remaining;
+
+  if (remaining.length > 0) {
+    const last = remaining[remaining.length - 1];
+    const cleanPhone = last.replace(/[\s-]/g, '');
+    if (/^\+?[0-9]{7,15}$/.test(cleanPhone)) {
+      driver_phone = last;
+      driverTokens = remaining.slice(0, remaining.length - 1);
+    }
+  }
+
+  const driver = driverTokens.join(' ').trim() || null;
+
+  return { plate, country, driver, driver_phone };
+}
+
+interface UndoState {
+  truckId: string;
+  plate: string;
+  prevGate1At: string | null;
+  prevGate2At: string | null;
+  actionText: string;
+  timeoutId: any;
+}
+
 export function App() {
-  // 1. Worker Auth state
-  const [currentWorker, setCurrentWorker] = useState<string | null>(() => {
-    return localStorage.getItem('gt_current_worker');
-  });
-  const [loginWorker, setLoginWorker] = useState<string>('worker1');
+  // 1. Auth state (Real Supabase Auth)
+  const [session, setSession] = useState<any>(null);
+  const [authLoading, setAuthLoading] = useState<boolean>(true);
+  const [loginInput, setLoginInput] = useState<string>('');
   const [loginPassword, setLoginPassword] = useState<string>('');
   const [loginError, setLoginError] = useState<string>('');
+  const [isSubmittingAuth, setIsSubmittingAuth] = useState<boolean>(false);
 
   // 2. Data state
   const [date, setDate] = useState<string>(() => {
@@ -23,132 +113,144 @@ export function App() {
   const [search, setSearch] = useState<string>('');
   const [toastMsg, setToastMsg] = useState<string>('');
 
-  // Option B: Worker filter and tabs
-  const [tab, setTab] = useState<'all' | 'my'>('all');
-  const [workerFilter, setWorkerFilter] = useState<string>('all');
+  // Minute ticker for live wait time update
+  const [, setTick] = useState<number>(0);
+  useEffect(() => {
+    const interval = setInterval(() => setTick((t) => t + 1), 60000);
+    return () => clearInterval(interval);
+  }, []);
 
-  // 3. UI modals
+  // Modals & form state
   const [showAdd, setShowAdd] = useState<boolean>(false);
-  const [showUploadModal, setShowUploadModal] = useState<boolean>(false);
+  const [showPasteModal, setShowPasteModal] = useState<boolean>(false);
+  const [pasteText, setPasteText] = useState<string>('');
+  const [isPasting, setIsPasting] = useState<boolean>(false);
   const [deleteConfirmId, setDeleteConfirmId] = useState<string | null>(null);
-  const [clearConfirm, setClearConfirm] = useState<boolean>(false);
+  const [newDayConfirm, setNewDayConfirm] = useState<boolean>(false);
 
   // New truck form
   const [newPlate, setNewPlate] = useState<string>('');
   const [newCountry, setNewCountry] = useState<'OMN' | 'DXB'>('OMN');
   const [newDriver, setNewDriver] = useState<string>('');
+  const [newPhone, setNewPhone] = useState<string>('');
 
-  // File upload
-  const fileInputRef = useRef<HTMLInputElement>(null);
-  const [uploadText, setUploadText] = useState<string>('');
-  const [parsingImage, setParsingImage] = useState<boolean>(false);
+  // Undo state (Feature 2)
+  const [undoState, setUndoState] = useState<UndoState | null>(null);
 
-  // Cross-tab broadcast for local simulation
-  const broadcastRef = useRef<BroadcastChannel | null>(null);
+  // iOS Add to Home Screen hint (Feature 1)
+  const [showIosPrompt, setShowIosPrompt] = useState<boolean>(() => {
+    try {
+      const isIos = /iphone|ipad|ipod/i.test(navigator.userAgent);
+      const isStandalone = ('standalone' in navigator && (navigator as any).standalone);
+      const dismissed = localStorage.getItem('gt_pwa_hint_dismissed');
+      return isIos && !isStandalone && !dismissed;
+    } catch {
+      return false;
+    }
+  });
+
+  // Admin filter by worker (for kenz)
+  const [adminWorkerFilter, setAdminWorkerFilter] = useState<string>('all');
 
   const showToast = (msg: string) => {
     setToastMsg(msg);
     setTimeout(() => {
       setToastMsg((cur) => (cur === msg ? '' : cur));
-    }, 2500);
+    }, 3500);
   };
 
-  // Setup broadcast channel for offline / local sync between tabs
+  // Auth initialization
   useEffect(() => {
-    try {
-      const bc = new BroadcastChannel('gate_tracker_channel');
-      bc.onmessage = (event) => {
-        if (event.data?.type === 'TRUCKS_UPDATED') {
-          loadTrucks();
-        }
-      };
-      broadcastRef.current = bc;
-      return () => bc.close();
-    } catch {
-      // BroadcastChannel unsupported
-    }
-  }, [date]);
+    supabase.auth.getSession().then(({ data: { session } }) => {
+      setSession(session);
+      setAuthLoading(false);
+    });
+
+    const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
+      setSession(session);
+      setAuthLoading(false);
+    });
+
+    return () => subscription.unsubscribe();
+  }, []);
+
+  const currentUserEmail = session?.user?.email || '';
+  const currentWorker = getEmailPrefix(currentUserEmail);
+  const isAdmin = currentWorker.toLowerCase() === 'kenz' || currentUserEmail.toLowerCase() === 'kenz@gate.app';
 
   // Handle Login
-  const handleLogin = (e: React.FormEvent) => {
+  const handleLogin = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (loginPassword.trim() !== WORKER_PASSWORD) {
-      setLoginError('Incorrect password! Default is worker123');
+    if (!loginInput.trim() || !loginPassword.trim()) {
+      setLoginError('Enter your username and password');
       return;
     }
-    localStorage.setItem('gt_current_worker', loginWorker);
-    setCurrentWorker(loginWorker);
-    setLoginPassword('');
+
+    setIsSubmittingAuth(true);
     setLoginError('');
-    showToast(`Welcome, ${loginWorker}!`);
+
+    // If user typed 'kenz' or 'w1', auto append '@gate.app'
+    let fullEmail = loginInput.trim();
+    if (!fullEmail.includes('@')) {
+      fullEmail = `${fullEmail}@gate.app`;
+    }
+
+    try {
+      const { data, error } = await supabase.auth.signInWithPassword({
+        email: fullEmail,
+        password: loginPassword,
+      });
+
+      if (error) {
+        setLoginError(error.message);
+      } else if (data.session) {
+        setSession(data.session);
+        setLoginPassword('');
+        setLoginError('');
+        showToast(`Welcome, ${getEmailPrefix(data.session.user.email)}!`);
+      }
+    } catch (err: any) {
+      setLoginError(err.message || 'Login failed');
+    } finally {
+      setIsSubmittingAuth(false);
+    }
   };
 
-  const handleLogout = () => {
-    localStorage.removeItem('gt_current_worker');
-    setCurrentWorker(null);
+  const handleLogout = async () => {
+    await supabase.auth.signOut();
+    setSession(null);
+    setTrucks([]);
   };
 
-  // Helper to test if a truck belongs to current worker
-  const isTruckMine = (t: TruckItem) => {
-    if (!currentWorker) return false;
-    return (
-      t.gate1_by === currentWorker ||
-      t.gate2_by === currentWorker ||
-      t.created_by === currentWorker ||
-      (t.driver && t.driver.toLowerCase().includes(currentWorker.toLowerCase()))
-    );
-  };
-
-  // Helper to test if a truck belongs to a specific worker
-  const isTruckWorker = (t: TruckItem, w: string) => {
-    return (
-      t.gate1_by === w ||
-      t.gate2_by === w ||
-      t.created_by === w ||
-      (t.driver && t.driver.toLowerCase().includes(w.toLowerCase()))
-    );
-  };
-
-  // Load trucks for the selected date
+  // Load trucks for the selected date from Supabase
   const loadTrucks = async () => {
-    if (isSupabaseConfigured && supabase) {
-      try {
-        const { data, error } = await supabase
-          .from('trucks')
-          .select('*')
-          .eq('work_date', date)
-          .order('created_at', { ascending: true });
+    if (!session) return;
+    try {
+      const { data, error } = await supabase
+        .from('trucks')
+        .select('*')
+        .eq('work_date', date)
+        .order('created_at', { ascending: true });
 
-        if (error) throw error;
-        setTrucks(data || []);
-      } catch (err: any) {
-        console.error('Supabase fetch error:', err);
-        showToast('Sync error: ' + (err.message || 'Check connection'));
-      }
-    } else {
-      const saved = localStorage.getItem(`gt_trucks_${date}`);
-      if (saved) {
-        try {
-          setTrucks(JSON.parse(saved));
-        } catch {
-          setTrucks([]);
-        }
-      } else {
-        setTrucks([]);
-      }
+      if (error) throw error;
+      setTrucks(data || []);
+    } catch (err: any) {
+      console.error('Supabase fetch error:', err);
+      showToast('Sync error: ' + (err.message || 'Check connection'));
     }
   };
 
   useEffect(() => {
-    loadTrucks();
-  }, [date]);
+    if (session) {
+      loadTrucks();
+    }
+  }, [date, session]);
 
   // Supabase Realtime subscription
   useEffect(() => {
-    const client = supabase;
-    if (!isSupabaseConfigured || !client) return;
+    if (!session) return;
 
-    const channel = client
+    const channel = supabase
       .channel('public:trucks')
       .on(
         'postgres_changes',
@@ -160,164 +262,200 @@ export function App() {
       .subscribe();
 
     return () => {
-      client.removeChannel(channel);
+      supabase.removeChannel(channel);
     };
-  }, [date]);
+  }, [date, session]);
 
-  // Helper to persist truck updates
-  const saveTruck = async (updated: TruckItem) => {
-    if (isSupabaseConfigured && supabase) {
-      try {
-        const { error } = await supabase
-          .from('trucks')
-          .update({
-            gate1_at: updated.gate1_at,
-            gate1_by: updated.gate1_by,
-            gate2_at: updated.gate2_at,
-            gate2_by: updated.gate2_by,
-            pcs: updated.pcs,
-          })
-          .eq('id', updated.id);
+  // Set undo toast helper
+  const triggerUndo = (truckId: string, plate: string, prevGate1At: string | null, prevGate2At: string | null, actionText: string) => {
+    if (undoState?.timeoutId) {
+      clearTimeout(undoState.timeoutId);
+    }
 
-        if (error) throw error;
-      } catch (err: any) {
-        showToast('Error saving: ' + err.message);
-      }
-    } else {
-      const next = trucks.map((t) => (t.id === updated.id ? updated : t));
-      setTrucks(next);
-      localStorage.setItem(`gt_trucks_${date}`, JSON.stringify(next));
-      broadcastRef.current?.postMessage({ type: 'TRUCKS_UPDATED' });
+    const timeoutId = setTimeout(() => {
+      setUndoState((cur) => (cur?.truckId === truckId ? null : cur));
+    }, 5000);
+
+    setUndoState({
+      truckId,
+      plate,
+      prevGate1At,
+      prevGate2At,
+      actionText,
+      timeoutId,
+    });
+  };
+
+  // Handle Undo click
+  const handleUndo = async () => {
+    if (!undoState) return;
+    const { truckId, prevGate1At, prevGate2At, timeoutId } = undoState;
+    if (timeoutId) clearTimeout(timeoutId);
+    setUndoState(null);
+
+    try {
+      const { error } = await supabase
+        .from('trucks')
+        .update({
+          gate1_at: prevGate1At,
+          gate2_at: prevGate2At,
+        })
+        .eq('id', truckId);
+
+      if (error) throw error;
+      showToast('Action undone');
+      await loadTrucks();
+    } catch (err: any) {
+      showToast('Undo failed: ' + err.message);
     }
   };
 
   // Toggle Gate 1
   const toggleGate1 = async (t: TruckItem) => {
-    if (!currentWorker) return;
     const isChecked = Boolean(t.gate1_at);
-    let updated: TruckItem;
+    const prevGate1At = t.gate1_at ?? null;
+    const prevGate2At = t.gate2_at ?? null;
+
+    let payload: { gate1_at: string | null; gate2_at: string | null };
+    let actionLabel: string;
 
     if (isChecked) {
-      updated = {
-        ...t,
-        gate1_at: null,
-        gate1_by: null,
-        gate2_at: null,
-        gate2_by: null,
-      };
-      showToast(`${t.plate}: Gate 1 cleared (Gate 2 reset)`);
+      payload = { gate1_at: null, gate2_at: null };
+      actionLabel = `${t.plate}: Gate 1 unticked`;
     } else {
-      updated = {
-        ...t,
-        gate1_at: new Date().toISOString(),
-        gate1_by: currentWorker,
-      };
-      showToast(`${t.plate}: Gate 1 ticked (${currentWorker})`);
+      payload = { gate1_at: new Date().toISOString(), gate2_at: prevGate2At };
+      actionLabel = `${t.plate}: Gate 1 ticked`;
     }
 
-    setTrucks((prev) => prev.map((item) => (item.id === t.id ? updated : item)));
-    await saveTruck(updated);
+    try {
+      const { error } = await supabase
+        .from('trucks')
+        .update(payload)
+        .eq('id', t.id);
+
+      if (error) throw error;
+
+      triggerUndo(t.id, t.plate, prevGate1At, prevGate2At, actionLabel);
+      await loadTrucks();
+    } catch (err: any) {
+      showToast('Error: ' + err.message);
+    }
   };
 
-  // Toggle Gate 2 (Loading place)
+  // Toggle Gate 2 (LOADED)
   const toggleGate2 = async (t: TruckItem) => {
-    if (!currentWorker) return;
-    
-    // Check gate 1 rule
     if (!t.gate1_at) {
       showToast('⚠️ Tick Gate 1 first!');
       return;
     }
 
     const isChecked = Boolean(t.gate2_at);
-    let updated: TruckItem;
+    const prevGate1At = t.gate1_at ?? null;
+    const prevGate2At = t.gate2_at ?? null;
 
-    if (isChecked) {
-      updated = {
-        ...t,
-        gate2_at: null,
-        gate2_by: null,
-      };
-      showToast(`${t.plate}: Gate 2 unticked`);
-    } else {
-      updated = {
-        ...t,
-        gate2_at: new Date().toISOString(),
-        gate2_by: currentWorker,
-      };
-      showToast(`🚚 ${t.plate}: LOADED! (${currentWorker})`);
+    const payload = {
+      gate2_at: isChecked ? null : new Date().toISOString(),
+    };
+    const actionLabel = isChecked ? `${t.plate}: Gate 2 unticked` : `${t.plate}: Gate 2 ticked`;
+
+    try {
+      const { error } = await supabase
+        .from('trucks')
+        .update(payload)
+        .eq('id', t.id);
+
+      if (error) throw error;
+
+      triggerUndo(t.id, t.plate, prevGate1At, prevGate2At, actionLabel);
+      await loadTrucks();
+    } catch (err: any) {
+      showToast('Error: ' + err.message);
     }
-
-    setTrucks((prev) => prev.map((item) => (item.id === t.id ? updated : item)));
-    await saveTruck(updated);
   };
 
-  // Update PC (Pieces)
-  const handlePcsChange = async (t: TruckItem, val: string) => {
+  // Update PC (Pieces) on blur
+  const handlePcsBlur = async (t: TruckItem, val: string) => {
     const pcsVal = val === '' ? null : parseInt(val, 10);
-    const updated = { ...t, pcs: isNaN(pcsVal as any) ? null : pcsVal };
-    setTrucks((prev) => prev.map((item) => (item.id === t.id ? updated : item)));
-    await saveTruck(updated);
+    const num = isNaN(pcsVal as any) ? null : pcsVal;
+    if (t.pcs === num) return;
+
+    try {
+      const { error } = await supabase
+        .from('trucks')
+        .update({ pcs: num })
+        .eq('id', t.id);
+
+      if (error) throw error;
+      setTrucks((prev) => prev.map((item) => (item.id === t.id ? { ...item, pcs: num } : item)));
+    } catch (err: any) {
+      showToast('PC save error: ' + err.message);
+    }
   };
 
-  // Add new truck manually
+  // Update Driver name and phone on blur
+  const handleDriverFieldsBlur = async (id: string, driver: string, driver_phone: string) => {
+    const dVal = driver.trim() || null;
+    const pVal = driver_phone.trim() || null;
+
+    try {
+      const { error } = await supabase
+        .from('trucks')
+        .update({ driver: dVal, driver_phone: pVal })
+        .eq('id', id);
+
+      if (error) throw error;
+    } catch (err: any) {
+      showToast('Driver save error: ' + err.message);
+    }
+  };
+
+  // Add single truck manually
   const handleAddTruck = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (!session) {
+      showToast('Please sign in first');
+      return;
+    }
+
     const cleanPlate = newPlate.trim().toUpperCase().replace(/[^0-9A-Z]/g, '');
     if (!cleanPlate) {
       showToast('Enter valid plate number');
       return;
     }
 
-    // Check duplicate plate for the day
-    const exists = trucks.some(
-      (t) => t.plate.toUpperCase() === cleanPlate && t.country === newCountry
-    );
-    if (exists) {
-      showToast(`⚠️ Truck ${cleanPlate} already in list!`);
-      return;
-    }
-
-    const workerTag = currentWorker || 'worker1';
-    const driverString = newDriver.trim() 
-      ? `${newDriver.trim()} · ${workerTag}` 
-      : workerTag;
-
-    const newTruckData: TruckItem = {
-      id: isSupabaseConfigured ? (crypto.randomUUID ? crypto.randomUUID() : `id-${Date.now()}`) : `t-${Date.now()}`,
+    const rowToInsert = {
       work_date: date,
       plate: cleanPlate,
       country: newCountry,
-      driver: driverString,
+      driver: newDriver.trim() || null,
+      driver_phone: newPhone.trim() || null,
       gate1_at: null,
-      gate1_by: null,
       gate2_at: null,
-      gate2_by: null,
       pcs: null,
     };
 
-    if (isSupabaseConfigured && supabase) {
-      try {
-        const { data, error } = await supabase.from('trucks').insert([newTruckData]).select();
-        if (error) throw error;
-        if (data && data[0]) {
-          setTrucks((prev) => [...prev, data[0]]);
-        }
-      } catch (err: any) {
-        showToast('Error: ' + err.message);
-        return;
-      }
-    } else {
-      const next = [...trucks, newTruckData];
-      setTrucks(next);
-      localStorage.setItem(`gt_trucks_${date}`, JSON.stringify(next));
-      broadcastRef.current?.postMessage({ type: 'TRUCKS_UPDATED' });
-    }
+    try {
+      const { data, error } = await supabase
+        .from('trucks')
+        .upsert([rowToInsert], { onConflict: 'work_date,plate,country', ignoreDuplicates: true })
+        .select();
 
-    setNewPlate('');
-    setNewDriver('');
-    setShowAdd(false);
-    showToast(`✓ Added ${cleanPlate} (${workerTag})`);
+      if (error) throw error;
+
+      await loadTrucks();
+
+      if (data && data.length > 0) {
+        showToast(`✓ Added ${cleanPlate}`);
+        setNewPlate('');
+        setNewDriver('');
+        setNewPhone('');
+        setShowAdd(false);
+      } else {
+        showToast(`⚠️ Truck ${cleanPlate} already exists for this day!`);
+      }
+    } catch (err: any) {
+      showToast('Error: ' + err.message);
+    }
   };
 
   // Delete single truck
@@ -330,59 +468,121 @@ export function App() {
       return;
     }
 
-    if (isSupabaseConfigured && supabase) {
-      try {
-        const { error } = await supabase.from('trucks').delete().eq('id', id);
-        if (error) throw error;
-      } catch (err: any) {
-        showToast('Delete error: ' + err.message);
-        return;
-      }
+    try {
+      const { error } = await supabase.from('trucks').delete().eq('id', id);
+      if (error) throw error;
+      setDeleteConfirmId(null);
+      await loadTrucks();
+      showToast('Truck removed');
+    } catch (err: any) {
+      showToast('Delete error: ' + err.message);
     }
-
-    const next = trucks.filter((t) => t.id !== id);
-    setTrucks(next);
-    localStorage.setItem(`gt_trucks_${date}`, JSON.stringify(next));
-    broadcastRef.current?.postMessage({ type: 'TRUCKS_UPDATED' });
-    setDeleteConfirmId(null);
-    showToast('Truck removed');
   };
 
-  // Clear all trucks for this day (when day is done)
-  const handleClearDay = async () => {
-    if (!clearConfirm) {
-      setClearConfirm(true);
-      setTimeout(() => setClearConfirm(false), 3500);
+  // New Day button: confirm -> set date to today with an empty list. Never delete old data.
+  const handleNewDay = () => {
+    if (!newDayConfirm) {
+      setNewDayConfirm(true);
+      setTimeout(() => setNewDayConfirm(false), 3500);
       return;
     }
 
-    if (isSupabaseConfigured && supabase) {
-      try {
-        const { error } = await supabase.from('trucks').delete().eq('work_date', date);
-        if (error) throw error;
-      } catch (err: any) {
-        showToast('Clear error: ' + err.message);
-        return;
+    const todayStr = new Date().toISOString().split('T')[0];
+    setDate(todayStr);
+    setNewDayConfirm(false);
+    showToast('Switched to New Day (Today)');
+  };
+
+  // Paste / Batch Insert trucks
+  const handlePasteSubmit = async () => {
+    if (!session) {
+      showToast('⚠️ No session! Please log in first.');
+      return;
+    }
+
+    const lines = pasteText.split('\n');
+    const toInsertMap = new Map<string, {
+      work_date: string;
+      plate: string;
+      country: 'OMN' | 'DXB';
+      driver: string | null;
+      driver_phone: string | null;
+      gate1_at: null;
+      gate2_at: null;
+      pcs: null;
+    }>();
+
+    for (const line of lines) {
+      const parsed = parseTruckLine(line);
+      if (!parsed) continue;
+      const key = `${parsed.plate}_${parsed.country}`;
+      if (!toInsertMap.has(key)) {
+        toInsertMap.set(key, {
+          work_date: date,
+          plate: parsed.plate,
+          country: parsed.country,
+          driver: parsed.driver,
+          driver_phone: parsed.driver_phone,
+          gate1_at: null,
+          gate2_at: null,
+          pcs: null,
+        });
       }
     }
 
-    setTrucks([]);
-    localStorage.removeItem(`gt_trucks_${date}`);
-    broadcastRef.current?.postMessage({ type: 'TRUCKS_UPDATED' });
-    setClearConfirm(false);
-    showToast('All trucks cleared for this date');
+    const rows = Array.from(toInsertMap.values());
+    if (rows.length === 0) {
+      showToast('No valid truck lines found');
+      return;
+    }
+
+    setIsPasting(true);
+
+    try {
+      const { data, error } = await supabase
+        .from('trucks')
+        .upsert(rows, {
+          onConflict: 'work_date,plate,country',
+          ignoreDuplicates: true,
+        })
+        .select();
+
+      if (error) throw error;
+
+      await loadTrucks();
+
+      const added = data ? data.length : 0;
+      const skipped = rows.length - added;
+
+      if (skipped > 0) {
+        showToast(`✓ ${added} added, ${skipped} skipped`);
+      } else {
+        showToast(`✓ ${added} trucks added!`);
+      }
+
+      setPasteText('');
+      setShowPasteModal(false);
+    } catch (err: any) {
+      showToast('Error: ' + (err.message || 'Could not paste trucks'));
+    } finally {
+      setIsPasting(false);
+    }
   };
 
   // Format and copy day report
-  const copyDayReport = (onlyMine: boolean = false) => {
-    let sourceTrucks = trucks;
-    if (onlyMine) {
-      sourceTrucks = sourceTrucks.filter(isTruckMine);
-    }
-    const loadedTrucks = sourceTrucks.filter((t) => Boolean(t.gate2_at));
+  // Exact format specified in prompt:
+  // 03-11-2026
+  // (blank line)
+  // KIZAD-CC
+  // (blank line)
+  // 3187YB.  OMN-07PC
+  // (blank line)
+  // LOADED
+  const copyDayReport = () => {
+    const loadedTrucks = trucks.filter((t) => Boolean(t.gate2_at));
 
     if (loadedTrucks.length === 0) {
-      showToast(onlyMine ? 'No loaded trucks for you yet!' : 'No loaded trucks (Gate 2) yet!');
+      showToast('No loaded trucks (Gate 2) yet!');
       return;
     }
 
@@ -397,196 +597,102 @@ export function App() {
 
     const reportText = `${formattedDate}\n\nKIZAD-CC\n\n${truckLines.join('\n')}\n\nLOADED`;
 
-    const label = onlyMine ? `My (${loadedTrucks.length})` : `All (${loadedTrucks.length})`;
-
     if (navigator.clipboard && navigator.clipboard.writeText) {
       navigator.clipboard.writeText(reportText).then(() => {
-        showToast(`📋 Copied ${label} report!`);
+        showToast(`📋 Copied Day Report (${loadedTrucks.length} Loaded)!`);
       }).catch(() => {
-        fallbackCopy(reportText, label);
+        fallbackCopy(reportText, loadedTrucks.length);
       });
     } else {
-      fallbackCopy(reportText, label);
+      fallbackCopy(reportText, loadedTrucks.length);
     }
   };
 
-  const fallbackCopy = (text: string, label: string) => {
+  const fallbackCopy = (text: string, count: number) => {
     const el = document.createElement('textarea');
     el.value = text;
     document.body.appendChild(el);
     el.select();
     try {
       document.execCommand('copy');
-      showToast(`📋 Copied ${label} report!`);
+      showToast(`📋 Copied Day Report (${count} Loaded)!`);
     } catch {
       showToast('Copy blocked by browser');
     }
     el.remove();
   };
 
-  // Parse text lines from image/doc
-  const parseAndAddRows = async (rawText: string) => {
-    const lines = rawText.split('\n');
-    const workerTag = currentWorker || 'worker1';
-    const toInsert: TruckItem[] = [];
-
-    for (const line of lines) {
-      const trimmed = line.trim();
-      if (!trimmed || trimmed.toLowerCase().includes('gate') || trimmed.toLowerCase().includes('kizad')) continue;
-
-      const isDxb = /DXB|DUBAI/i.test(trimmed);
-      const country: 'OMN' | 'DXB' = isDxb ? 'DXB' : 'OMN';
-
-      const cleanMatch = trimmed.match(/[0-9]{3,6}[A-Z]{0,3}|[A-Z]{1,3}[0-9]{3,6}/i);
-      if (!cleanMatch) continue;
-      const plate = cleanMatch[0].toUpperCase();
-
-      const already = trucks.some(
-        (t) => t.plate.toUpperCase() === plate && t.country === country
-      ) || toInsert.some(
-        (t) => t.plate.toUpperCase() === plate && t.country === country
-      );
-      if (already) continue;
-
-      toInsert.push({
-        id: isSupabaseConfigured ? (crypto.randomUUID ? crypto.randomUUID() : `id-${Date.now()}-${Math.random()}`) : `t-${Date.now()}-${Math.random()}`,
-        work_date: date,
-        plate: plate,
-        country: country,
-        driver: workerTag,
-        gate1_at: null,
-        gate1_by: null,
-        gate2_at: null,
-        gate2_by: null,
-        pcs: null,
-      });
-    }
-
-    if (toInsert.length > 0) {
-      if (isSupabaseConfigured && supabase) {
-        try {
-          const { data, error } = await supabase.from('trucks').insert(toInsert).select();
-          if (error) throw error;
-          if (data) {
-            setTrucks((prev) => [...prev, ...data]);
-          }
-        } catch (err: any) {
-          showToast('Supabase insert: ' + err.message);
-          return;
-        }
-      } else {
-        const next = [...trucks, ...toInsert];
-        setTrucks(next);
-        localStorage.setItem(`gt_trucks_${date}`, JSON.stringify(next));
-        broadcastRef.current?.postMessage({ type: 'TRUCKS_UPDATED' });
-      }
-      showToast(`Added ${toInsert.length} trucks for ${workerTag}!`);
-    } else {
-      showToast('No new trucks found in text.');
-    }
-  };
-
-  // Image Upload handler
-  const handlePhotoUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
-
-    setParsingImage(true);
-    showToast('Analyzing image photo…');
-
-    const apiKey = import.meta.env.VITE_GEMINI_API_KEY;
-
-    if (apiKey) {
-      try {
-        const reader = new FileReader();
-        reader.readAsDataURL(file);
-        reader.onloadend = async () => {
-          const base64data = (reader.result as string).split(',')[1];
-          const response = await fetch(
-            `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${apiKey}`,
-            {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({
-                contents: [
-                  {
-                    parts: [
-                      {
-                        inline_data: {
-                          mime_type: file.type,
-                          data: base64data,
-                        },
-                      },
-                      {
-                        text: 'Extract the truck list from this image. For each truck, output: PLATE, COUNTRY (OMN or DXB), DRIVER. Example:\n3187YB OMN Salim\n39263 DXB Rashid\n81852 DXB Tariq\nOnly output clean text lines, no markdown.',
-                      },
-                    ],
-                  },
-                ],
-              }),
-            }
-          );
-
-          const result = await response.json();
-          const generatedText = result.candidates?.[0]?.content?.parts?.[0]?.text || '';
-          if (generatedText) {
-            await parseAndAddRows(generatedText);
-          } else {
-            showToast('Could not extract text');
-          }
-          setParsingImage(false);
-        };
-      } catch (err: any) {
-        showToast('Vision error: ' + err.message);
-        setParsingImage(false);
-      }
-    } else {
-      setShowUploadModal(true);
-      setParsingImage(false);
-    }
-  };
-
-  // Filter trucks by search, tab (All vs My), and worker filter
+  // Filter trucks by search and admin worker filter (kenz only)
   const filteredTrucks = useMemo(() => {
     let list = trucks;
 
-    // Tab filter
-    if (tab === 'my') {
-      list = list.filter(isTruckMine);
+    if (isAdmin && adminWorkerFilter !== 'all') {
+      list = list.filter((t) => (t.owner_name || '').toLowerCase() === adminWorkerFilter.toLowerCase());
     }
 
-    // Specific worker dropdown filter
-    if (workerFilter !== 'all') {
-      list = list.filter((t) => isTruckWorker(t, workerFilter));
-    }
-
-    // Search query
     if (search.trim()) {
       const q = search.toLowerCase();
       list = list.filter(
         (t) =>
           t.plate.toLowerCase().includes(q) ||
           (t.driver && t.driver.toLowerCase().includes(q)) ||
+          (t.driver_phone && t.driver_phone.includes(q)) ||
           t.country.toLowerCase().includes(q)
       );
     }
 
     return list;
-  }, [trucks, tab, workerFilter, search, currentWorker]);
+  }, [trucks, isAdmin, adminWorkerFilter, search]);
 
-  // Counters
+  // Top Counters
   const sTotal = trucks.length;
   const sGate1 = trucks.filter((t) => Boolean(t.gate1_at)).length;
   const sLoaded = trucks.filter((t) => Boolean(t.gate2_at)).length;
 
-  const myTrucksList = useMemo(() => trucks.filter(isTruckMine), [trucks, currentWorker]);
-  const sMyTotal = myTrucksList.length;
-  const sMyLoaded = myTrucksList.filter((t) => Boolean(t.gate2_at)).length;
+  // Average wait time for loaded trucks of the day
+  const loadedWithBothGates = trucks.filter((t) => Boolean(t.gate1_at && t.gate2_at));
+  const avgWaitMin = useMemo(() => {
+    if (loadedWithBothGates.length === 0) return 0;
+    const totalDiff = loadedWithBothGates.reduce(
+      (acc, t) => acc + getMinutesDiff(t.gate1_at!, t.gate2_at!),
+      0
+    );
+    return Math.round(totalDiff / loadedWithBothGates.length);
+  }, [loadedWithBothGates]);
+
+  // Kenz Admin: Per-worker summary (trucks / Gate 1 / Loaded)
+  const workerSummaries = useMemo(() => {
+    if (!isAdmin) return [];
+    const map = new Map<string, { total: number; gate1: number; loaded: number }>();
+
+    for (const t of trucks) {
+      const w = t.owner_name || 'unassigned';
+      const cur = map.get(w) || { total: 0, gate1: 0, loaded: 0 };
+      cur.total += 1;
+      if (t.gate1_at) cur.gate1 += 1;
+      if (t.gate2_at) cur.loaded += 1;
+      map.set(w, cur);
+    }
+
+    return Array.from(map.entries()).map(([name, stats]) => ({
+      name,
+      ...stats,
+    }));
+  }, [trucks, isAdmin]);
+
+  // Loading indicator for initial session check
+  if (authLoading) {
+    return (
+      <div style={{ height: '100dvh', width: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center', background: '#f5f6f9' }}>
+        <div style={{ color: '#6b7280', fontSize: '13px', fontWeight: 600 }}>Loading Gate Tracker…</div>
+      </div>
+    );
+  }
 
   // -------------------------------------------------------------------------
-  // LOGIN SCREEN (Pure White Aesthetic - ZERO API keys shown to workers)
+  // LOGIN SCREEN (Real Supabase Auth, no hardcoded worker list or passwords)
   // -------------------------------------------------------------------------
-  if (!currentWorker) {
+  if (!session) {
     return (
       <div style={{ 
         height: '100dvh', width: '100%', 
@@ -596,73 +702,70 @@ export function App() {
         <div style={{ textAlign: 'center', marginBottom: '24px' }}>
           <div style={{ 
             display: 'inline-flex', alignItems: 'center', justifyContent: 'center', 
-            width: '52px', height: '52px', borderRadius: '16px', 
+            width: '54px', height: '54px', borderRadius: '16px', 
             background: '#ffffff', border: '1px solid #e5e7eb', 
             boxShadow: '0 2px 8px rgba(0,0,0,0.04)',
             marginBottom: '12px' 
           }}>
-            <Truck size={26} color="#111827" />
+            <Truck size={28} color="#111827" />
           </div>
           <h1 style={{ fontSize: '20px', fontWeight: 800, color: '#111827', letterSpacing: '-0.4px' }}>Gate Tracker</h1>
-          <p style={{ color: '#6b7280', fontSize: '12px', marginTop: '2px', fontWeight: 500 }}>KIZAD · CC · Worker Access</p>
+          <p style={{ color: '#6b7280', fontSize: '12px', marginTop: '2px', fontWeight: 500 }}>KIZAD · CC · Gate System</p>
         </div>
 
         <div style={{ 
-          background: '#ffffff', borderRadius: '20px', padding: '20px', 
+          background: '#ffffff', borderRadius: '20px', padding: '22px 20px', 
           border: '1px solid #e5e7eb', boxShadow: '0 4px 16px rgba(0,0,0,0.03)' 
         }}>
-          <div style={{ fontSize: '12px', fontWeight: 700, color: '#374151', marginBottom: '12px', display: 'flex', alignItems: 'center', gap: '6px' }}>
-            <User size={15} /> Select Your Worker ID
-          </div>
-
-          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: '6px', marginBottom: '16px' }}>
-            {WORKERS.map((w) => {
-              const active = loginWorker === w;
-              return (
-                <button
-                  key={w}
-                  type="button"
-                  onClick={() => setLoginWorker(w)}
-                  style={{
-                    padding: '11px 4px',
-                    borderRadius: '12px',
-                    border: '1px solid',
-                    borderColor: active ? '#111827' : '#e5e7eb',
-                    background: active ? '#111827' : '#f9fafb',
-                    color: active ? '#ffffff' : '#374151',
-                    fontWeight: 700,
-                    fontSize: '12px',
-                    cursor: 'pointer',
-                    transition: 'all 0.12s ease'
-                  }}
-                >
-                  {w}
-                </button>
-              );
-            })}
-          </div>
+          <h2 style={{ fontSize: '14px', fontWeight: 800, color: '#111827', marginBottom: '14px' }}>
+            Worker Sign In
+          </h2>
 
           <form onSubmit={handleLogin}>
+            <div style={{ marginBottom: '12px' }}>
+              <label style={{ display: 'block', fontSize: '11px', fontWeight: 700, color: '#4b5563', marginBottom: '5px' }}>
+                Worker ID or Email
+              </label>
+              <input
+                type="text"
+                placeholder="e.g. kenz, w1, w3, w4"
+                value={loginInput}
+                onChange={(e) => setLoginInput(e.target.value)}
+                style={{
+                  width: '100%',
+                  padding: '11px 13px',
+                  background: '#f9fafb',
+                  border: '1px solid #e5e7eb',
+                  borderRadius: '11px',
+                  color: '#111827',
+                  fontSize: '13px',
+                  outline: 'none',
+                  boxSizing: 'border-box'
+                }}
+                autoFocus
+              />
+            </div>
+
             <div style={{ marginBottom: '14px' }}>
-              <label style={{ display: 'block', fontSize: '11px', fontWeight: 600, color: '#6b7280', marginBottom: '5px' }}>
-                Password (Default: worker123)
+              <label style={{ display: 'block', fontSize: '11px', fontWeight: 700, color: '#4b5563', marginBottom: '5px' }}>
+                Password
               </label>
               <input
                 type="password"
-                placeholder="worker123"
+                placeholder="Enter password"
                 value={loginPassword}
                 onChange={(e) => setLoginPassword(e.target.value)}
                 style={{
                   width: '100%',
-                  padding: '12px 14px',
+                  padding: '11px 13px',
                   background: '#f9fafb',
                   border: '1px solid #e5e7eb',
-                  borderRadius: '12px',
+                  borderRadius: '11px',
                   color: '#111827',
-                  fontSize: '14px',
+                  fontSize: '13px',
                   outline: 'none',
+                  boxSizing: 'border-box'
                 }}
-                autoFocus
               />
             </div>
 
@@ -674,19 +777,21 @@ export function App() {
 
             <button
               type="submit"
+              disabled={isSubmittingAuth}
               style={{
                 width: '100%',
-                padding: '13px',
-                borderRadius: '14px',
+                padding: '12px',
+                borderRadius: '12px',
                 border: 'none',
                 background: '#111827',
                 color: '#ffffff',
-                fontSize: '14px',
+                fontSize: '13px',
                 fontWeight: 700,
-                cursor: 'pointer'
+                cursor: 'pointer',
+                opacity: isSubmittingAuth ? 0.7 : 1
               }}
             >
-              Sign In as {loginWorker}
+              {isSubmittingAuth ? 'Signing in…' : 'Sign In'}
             </button>
           </form>
         </div>
@@ -695,7 +800,7 @@ export function App() {
   }
 
   // -------------------------------------------------------------------------
-  // MAIN DASHBOARD (Option B: All / My Trucks Filter, All Day Persistence)
+  // MAIN DASHBOARD (Pure White Aesthetic, Shredded Compact Viewport)
   // -------------------------------------------------------------------------
   return (
     <div style={{ 
@@ -704,9 +809,29 @@ export function App() {
       overflow: 'hidden', background: '#f5f6f9', position: 'relative' 
     }}>
       
-      {/* 1. FIXED TOP HEADER BAR (Compact) */}
+      {/* iOS Add to Home Screen Banner Hint */}
+      {showIosPrompt && (
+        <div style={{
+          background: '#111827', color: '#ffffff', padding: '7px 12px',
+          fontSize: '11px', fontWeight: 600, display: 'flex', alignItems: 'center',
+          justifyContent: 'space-between', zIndex: 50, borderBottom: '1px solid #374151'
+        }}>
+          <span>📲 Tap <strong>Share</strong>, then <strong>Add to Home Screen</strong></span>
+          <button
+            onClick={() => {
+              localStorage.setItem('gt_pwa_hint_dismissed', '1');
+              setShowIosPrompt(false);
+            }}
+            style={{ background: 'none', border: 'none', color: '#9ca3af', cursor: 'pointer', padding: '2px 4px' }}
+          >
+            ✕
+          </button>
+        </div>
+      )}
+
+      {/* 1. FIXED TOP HEADER BAR */}
       <header style={{ 
-        flexShrink: 0, padding: '12px 14px 8px', 
+        flexShrink: 0, padding: '10px 12px 6px', 
         background: '#ffffff', borderBottom: '1px solid #e5e7eb',
         boxShadow: '0 1px 3px rgba(0,0,0,0.02)'
       }}>
@@ -720,41 +845,42 @@ export function App() {
                 fontSize: '9px', fontWeight: 700, padding: '2px 6px', borderRadius: '6px', 
                 background: '#ecfdf5', color: '#059669', border: '1px solid #a7f3d0'
               }}>
-                🟢 Live Cloud
+                🟢 Live
               </span>
             </div>
             <div style={{ fontSize: '11px', color: '#6b7280', fontWeight: 500 }}>
-              KIZAD · CC · <span style={{ fontWeight: 700, color: '#111827' }}>{currentWorker}</span>
+              KIZAD · CC · <span style={{ fontWeight: 800, color: '#111827' }}>{currentWorker}</span>
+              {isAdmin && <span style={{ marginLeft: '4px', fontSize: '9px', color: '#2563eb', fontWeight: 700 }}>[Admin]</span>}
             </div>
           </div>
 
           <div style={{ display: 'flex', alignItems: 'center', gap: '5px' }}>
-            {/* Clear All Day Button (After work is finished) */}
+            {/* New Day Button */}
             <button
-              onClick={handleClearDay}
-              title="Clear all trucks for this date"
+              onClick={handleNewDay}
+              title="Switch to New Day (Today)"
               style={{
                 height: '32px', padding: '0 8px', borderRadius: '10px',
-                background: clearConfirm ? '#fee2e2' : '#f3f4f6',
-                border: `1px solid ${clearConfirm ? '#fca5a5' : '#e5e7eb'}`,
-                color: clearConfirm ? '#dc2626' : '#6b7280',
+                background: newDayConfirm ? '#dbeafe' : '#f3f4f6',
+                border: `1px solid ${newDayConfirm ? '#93c5fd' : '#e5e7eb'}`,
+                color: newDayConfirm ? '#1d4ed8' : '#374151',
                 fontSize: '11px', fontWeight: 700,
                 display: 'flex', alignItems: 'center', gap: '4px',
                 cursor: 'pointer'
               }}
             >
-              <Trash2 size={13} />
-              <span>{clearConfirm ? 'Clear all?' : 'Clear'}</span>
+              <span>{newDayConfirm ? 'Today?' : 'New day'}</span>
             </button>
 
+            {/* Logout Button */}
             <button
               onClick={handleLogout}
               title="Log out"
               style={{
-                height: '32px', padding: '0 10px', borderRadius: '10px',
+                height: '32px', padding: '0 8px', borderRadius: '10px',
                 background: '#f3f4f6', border: '1px solid #e5e7eb',
                 color: '#111827', fontSize: '11px', fontWeight: 700,
-                display: 'flex', alignItems: 'center', gap: '5px',
+                display: 'flex', alignItems: 'center', gap: '4px',
                 cursor: 'pointer'
               }}
             >
@@ -764,16 +890,17 @@ export function App() {
           </div>
         </div>
 
-        {/* Shredded Controls Line: Date + Photo + Add */}
-        <div style={{ display: 'flex', gap: '6px', marginTop: '10px', alignItems: 'center' }}>
-          <div style={{ position: 'relative', flex: 1.2 }}>
+        {/* Shredded Controls Line: Date input + Paste button + Add Truck button */}
+        <div style={{ display: 'flex', gap: '5px', marginTop: '8px', alignItems: 'center' }}>
+          <div style={{ flex: 1.3, minWidth: 0 }}>
             <input
               type="date"
               value={date}
               onChange={(e) => setDate(e.target.value)}
               style={{
                 width: '100%',
-                padding: '7px 8px',
+                minWidth: 0,
+                padding: '6px 8px',
                 borderRadius: '10px',
                 background: '#f9fafb',
                 border: '1px solid #e5e7eb',
@@ -781,37 +908,33 @@ export function App() {
                 fontSize: '12px',
                 fontWeight: 700,
                 outline: 'none',
-                boxSizing: 'border-box'
+                boxSizing: 'border-box',
+                appearance: 'none',
+                WebkitAppearance: 'none',
+                height: '34px'
               }}
             />
           </div>
 
           <button
-            onClick={() => fileInputRef.current?.click()}
-            disabled={parsingImage}
+            onClick={() => setShowPasteModal(true)}
             style={{
-              padding: '7px 11px', borderRadius: '10px',
+              height: '34px',
+              padding: '0 9px', borderRadius: '10px',
               background: '#111827', color: '#ffffff',
               border: 'none', fontWeight: 700, fontSize: '11px',
               display: 'flex', alignItems: 'center', gap: '4px',
               cursor: 'pointer', whiteSpace: 'nowrap'
             }}
           >
-            <Upload size={13} />
-            {parsingImage ? 'Scanning…' : 'Photo'}
+            <span>📋 Paste</span>
           </button>
-          <input
-            ref={fileInputRef}
-            type="file"
-            accept="image/*"
-            style={{ display: 'none' }}
-            onChange={handlePhotoUpload}
-          />
 
           <button
             onClick={() => setShowAdd(!showAdd)}
             style={{
-              padding: '7px 11px', borderRadius: '10px',
+              height: '34px',
+              padding: '0 9px', borderRadius: '10px',
               background: showAdd ? '#111827' : '#ffffff',
               color: showAdd ? '#ffffff' : '#111827',
               border: '1px solid #e5e7eb',
@@ -821,7 +944,7 @@ export function App() {
             }}
           >
             <Plus size={13} />
-            Truck
+            <span>Truck</span>
           </button>
         </div>
 
@@ -835,7 +958,7 @@ export function App() {
                 value={newPlate}
                 onChange={(e) => setNewPlate(e.target.value)}
                 style={{
-                  flex: 2, padding: '8px 10px', borderRadius: '8px',
+                  flex: 2, padding: '7px 9px', borderRadius: '8px',
                   background: '#f9fafb', border: '1px solid #e5e7eb',
                   color: '#111827', fontSize: '12px', outline: 'none'
                 }}
@@ -845,23 +968,34 @@ export function App() {
                 value={newCountry}
                 onChange={(e) => setNewCountry(e.target.value as 'OMN' | 'DXB')}
                 style={{
-                  flex: 1, padding: '8px 6px', borderRadius: '8px',
+                  flex: 1, padding: '7px 5px', borderRadius: '8px',
                   background: '#f9fafb', border: '1px solid #e5e7eb',
                   color: '#111827', fontSize: '12px', fontWeight: 700, outline: 'none'
                 }}
               >
-                <option value="OMN">OMN (6)</option>
-                <option value="DXB">DXB (5)</option>
+                <option value="OMN">OMN</option>
+                <option value="DXB">DXB</option>
               </select>
             </div>
             <div style={{ display: 'flex', gap: '5px' }}>
               <input
                 type="text"
-                placeholder="Driver name (optional)"
+                placeholder="Driver name"
                 value={newDriver}
                 onChange={(e) => setNewDriver(e.target.value)}
                 style={{
-                  flex: 2, padding: '8px 10px', borderRadius: '8px',
+                  flex: 1.5, padding: '7px 9px', borderRadius: '8px',
+                  background: '#f9fafb', border: '1px solid #e5e7eb',
+                  color: '#111827', fontSize: '12px', outline: 'none'
+                }}
+              />
+              <input
+                type="tel"
+                placeholder="Phone"
+                value={newPhone}
+                onChange={(e) => setNewPhone(e.target.value)}
+                style={{
+                  flex: 1.5, padding: '7px 9px', borderRadius: '8px',
                   background: '#f9fafb', border: '1px solid #e5e7eb',
                   color: '#111827', fontSize: '12px', outline: 'none'
                 }}
@@ -869,7 +1003,7 @@ export function App() {
               <button
                 type="submit"
                 style={{
-                  flex: 1, padding: '8px', borderRadius: '8px',
+                  flex: 1, padding: '7px', borderRadius: '8px',
                   background: '#111827', color: '#ffffff',
                   border: 'none', fontWeight: 700, fontSize: '12px', cursor: 'pointer'
                 }}
@@ -880,104 +1014,95 @@ export function App() {
           </form>
         )}
 
-        {/* OPTION B: Filter Tabs (All Trucks vs My Trucks) */}
-        <div style={{ display: 'flex', gap: '4px', marginTop: '8px', alignItems: 'center' }}>
-          <button
-            type="button"
-            onClick={() => { setTab('all'); setWorkerFilter('all'); }}
-            style={{
-              flex: 1, padding: '6px 4px', borderRadius: '8px', border: '1px solid',
-              borderColor: tab === 'all' && workerFilter === 'all' ? '#111827' : '#e5e7eb',
-              background: tab === 'all' && workerFilter === 'all' ? '#111827' : '#ffffff',
-              color: tab === 'all' && workerFilter === 'all' ? '#ffffff' : '#6b7280',
-              fontWeight: 700, fontSize: '11px', cursor: 'pointer'
-            }}
-          >
-            All Trucks ({sTotal})
-          </button>
-
-          <button
-            type="button"
-            onClick={() => { setTab('my'); setWorkerFilter('all'); }}
-            style={{
-              flex: 1, padding: '6px 4px', borderRadius: '8px', border: '1px solid',
-              borderColor: tab === 'my' ? '#2563eb' : '#e5e7eb',
-              background: tab === 'my' ? '#eff6ff' : '#ffffff',
-              color: tab === 'my' ? '#2563eb' : '#6b7280',
-              fontWeight: 700, fontSize: '11px', cursor: 'pointer'
-            }}
-          >
-            My Trucks ({sMyTotal})
-          </button>
-
-          {/* Worker Dropdown Filter */}
-          <select
-            value={workerFilter}
-            onChange={(e) => {
-              setWorkerFilter(e.target.value);
-              if (e.target.value !== 'all') setTab('all');
-            }}
-            style={{
-              padding: '6px 6px', borderRadius: '8px', border: '1px solid #e5e7eb',
-              background: workerFilter !== 'all' ? '#111827' : '#ffffff',
-              color: workerFilter !== 'all' ? '#ffffff' : '#4b5563',
-              fontWeight: 700, fontSize: '11px', outline: 'none', cursor: 'pointer'
-            }}
-          >
-            <option value="all">Worker: Any</option>
-            {WORKERS.map((w) => (
-              <option key={w} value={w}>{w}</option>
-            ))}
-          </select>
-        </div>
-
-        {/* Compact Shredded Stats Pills */}
-        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: '6px', marginTop: '6px' }}>
+        {/* Top Counters: Total, Gate 1, Loaded, Avg wait */}
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: '4px', marginTop: '6px' }}>
           <div style={{ 
-            background: '#eff6ff', borderRadius: '10px', padding: '5px', 
-            textAlign: 'center', border: '1px solid #dbeafe', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '6px'
+            background: '#f9fafb', borderRadius: '8px', padding: '4px', 
+            textAlign: 'center', border: '1px solid #e5e7eb'
           }}>
-            <span style={{ fontSize: '13px', fontWeight: 800, color: '#2563eb', fontFamily: 'JetBrains Mono' }}>
+            <div style={{ fontSize: '13px', fontWeight: 800, color: '#111827', fontFamily: 'JetBrains Mono' }}>
+              {sTotal}
+            </div>
+            <div style={{ fontSize: '9px', fontWeight: 700, color: '#6b7280' }}>Total</div>
+          </div>
+
+          <div style={{ 
+            background: '#eff6ff', borderRadius: '8px', padding: '4px', 
+            textAlign: 'center', border: '1px solid #dbeafe'
+          }}>
+            <div style={{ fontSize: '13px', fontWeight: 800, color: '#2563eb', fontFamily: 'JetBrains Mono' }}>
               {sGate1}
-            </span>
-            <span style={{ fontSize: '10px', fontWeight: 700, color: '#1e40af' }}>Gate 1</span>
+            </div>
+            <div style={{ fontSize: '9px', fontWeight: 700, color: '#1e40af' }}>Gate 1</div>
           </div>
 
           <div style={{ 
-            background: '#ecfdf5', borderRadius: '10px', padding: '5px', 
-            textAlign: 'center', border: '1px solid #a7f3d0', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '6px'
+            background: '#ecfdf5', borderRadius: '8px', padding: '4px', 
+            textAlign: 'center', border: '1px solid #a7f3d0'
           }}>
-            <span style={{ fontSize: '13px', fontWeight: 800, color: '#059669', fontFamily: 'JetBrains Mono' }}>
+            <div style={{ fontSize: '13px', fontWeight: 800, color: '#059669', fontFamily: 'JetBrains Mono' }}>
               {sLoaded}
-            </span>
-            <span style={{ fontSize: '10px', fontWeight: 700, color: '#065f46' }}>Loaded</span>
+            </div>
+            <div style={{ fontSize: '9px', fontWeight: 700, color: '#065f46' }}>Loaded</div>
           </div>
 
           <div style={{ 
-            background: '#f9fafb', borderRadius: '10px', padding: '5px', 
-            textAlign: 'center', border: '1px solid #e5e7eb', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '6px'
+            background: '#fef3c7', borderRadius: '8px', padding: '4px', 
+            textAlign: 'center', border: '1px solid #fde68a'
           }}>
-            <span style={{ fontSize: '13px', fontWeight: 800, color: '#111827', fontFamily: 'JetBrains Mono' }}>
-              {filteredTrucks.length}
-            </span>
-            <span style={{ fontSize: '10px', fontWeight: 700, color: '#6b7280' }}>Shown</span>
+            <div style={{ fontSize: '13px', fontWeight: 800, color: '#b45309', fontFamily: 'JetBrains Mono' }}>
+              {avgWaitMin > 0 ? `${avgWaitMin}m` : '--'}
+            </div>
+            <div style={{ fontSize: '9px', fontWeight: 700, color: '#92400e' }}>Avg wait</div>
           </div>
         </div>
+
+        {/* Admin per-worker summary (for kenz only) */}
+        {isAdmin && workerSummaries.length > 0 && (
+          <div style={{ 
+            marginTop: '6px', padding: '5px 8px', borderRadius: '8px',
+            background: '#f3f4f6', border: '1px solid #e5e7eb',
+            display: 'flex', gap: '8px', overflowX: 'auto', alignItems: 'center'
+          }}>
+            <span style={{ fontSize: '10px', fontWeight: 800, color: '#374151', whiteSpace: 'nowrap' }}>Workers:</span>
+            {workerSummaries.map((w) => (
+              <button
+                key={w.name}
+                type="button"
+                onClick={() => setAdminWorkerFilter(adminWorkerFilter === w.name ? 'all' : w.name)}
+                style={{
+                  fontSize: '10px',
+                  fontWeight: 700,
+                  padding: '2px 6px',
+                  borderRadius: '6px',
+                  border: '1px solid',
+                  borderColor: adminWorkerFilter === w.name ? '#111827' : '#d1d5db',
+                  background: adminWorkerFilter === w.name ? '#111827' : '#ffffff',
+                  color: adminWorkerFilter === w.name ? '#ffffff' : '#374151',
+                  cursor: 'pointer',
+                  whiteSpace: 'nowrap'
+                }}
+              >
+                {w.name}: {w.total}t · {w.gate1}g1 · {w.loaded}ld
+              </button>
+            ))}
+          </div>
+        )}
 
         {/* Slim Search Input */}
         <div style={{ position: 'relative', marginTop: '6px' }}>
           <Search size={13} color="#9ca3af" style={{ position: 'absolute', left: '10px', top: '9px' }} />
           <input
             type="text"
-            placeholder={tab === 'my' ? `Search ${currentWorker}'s trucks…` : 'Search plate or driver…'}
+            placeholder="Search plate, driver, phone…"
             value={search}
             onChange={(e) => setSearch(e.target.value)}
             style={{
               width: '100%',
-              padding: '7px 28px 7px 28px',
+              padding: '6px 28px 6px 28px',
               background: '#f9fafb',
               border: '1px solid #e5e7eb',
-              borderRadius: '10px',
+              borderRadius: '9px',
               color: '#111827',
               fontSize: '12px',
               outline: 'none',
@@ -988,7 +1113,7 @@ export function App() {
             <button
               onClick={() => setSearch('')}
               style={{
-                position: 'absolute', right: '8px', top: '7px',
+                position: 'absolute', right: '8px', top: '6px',
                 background: 'none', border: 'none', color: '#9ca3af', cursor: 'pointer'
               }}
             >
@@ -999,7 +1124,7 @@ export function App() {
       </header>
 
       {/* 2. SCROLLABLE TRUCK LIST (ONLY this part scrolls) */}
-      <main className="scroll-area" style={{ padding: '8px 12px 85px' }}>
+      <main className="scroll-area" style={{ padding: '8px 10px 85px' }}>
         {filteredTrucks.length === 0 ? (
           <div style={{ 
             background: '#ffffff', borderRadius: '16px', padding: '30px 16px', 
@@ -1007,12 +1132,10 @@ export function App() {
           }}>
             <Truck size={30} color="#9ca3af" style={{ margin: '0 auto 8px' }} />
             <p style={{ color: '#111827', fontWeight: 700, fontSize: '13px' }}>
-              {tab === 'my' ? `No trucks for ${currentWorker}` : 'No trucks found'}
+              No trucks found
             </p>
             <p style={{ color: '#6b7280', fontSize: '11px', marginTop: '2px' }}>
-              {tab === 'my' 
-                ? 'Tap "+ Truck" to add your trucks, or switch to "All Trucks"' 
-                : 'Tap "Photo" or "+ Truck" above'}
+              Tap <strong>Paste</strong> or <strong>+ Truck</strong> above to add trucks.
             </p>
           </div>
         ) : (
@@ -1020,32 +1143,41 @@ export function App() {
             {filteredTrucks.map((t) => {
               const isG1 = Boolean(t.gate1_at);
               const isG2 = Boolean(t.gate2_at);
-              const mine = isTruckMine(t);
+
+              // Time & wait calculations
+              const g1Time = formatDubaiTime(t.gate1_at);
+              const g2Time = formatDubaiTime(t.gate2_at);
+
+              let waitText = '';
+              if (isG1 && !isG2) {
+                const diff = getMinutesDiff(t.gate1_at!);
+                waitText = `Waiting ${diff} min`;
+              } else if (isG1 && isG2) {
+                const diff = getMinutesDiff(t.gate1_at!, t.gate2_at!);
+                waitText = `Took ${diff} min`;
+              }
 
               return (
                 <div
                   key={t.id}
                   style={{
                     background: '#ffffff',
-                    borderRadius: '14px',
-                    padding: '9px 10px',
+                    borderRadius: '13px',
+                    padding: '8px 9px',
                     border: isG2 
                       ? '1px solid #a7f3d0' 
                       : isG1 
                       ? '1px solid #bfdbfe' 
-                      : mine
-                      ? '1px solid #dbeafe'
                       : '1px solid #e5e7eb',
-                    boxShadow: '0 1px 2px rgba(0,0,0,0.03)',
-                    transition: 'border-color 0.15s ease'
+                    boxShadow: '0 1px 2px rgba(0,0,0,0.02)',
                   }}
                 >
-                  {/* Row 1: Plate, Country tag, Loaded badge, Driver/Owner, Delete */}
-                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '7px' }}>
-                    <div style={{ display: 'flex', alignItems: 'center', gap: '6px', flexWrap: 'wrap' }}>
+                  {/* Row 1: Plate, Country tag, Loaded badge, Owner (kenz only), Wait time, Delete */}
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '5px' }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '5px', flexWrap: 'wrap' }}>
                       <span style={{ 
                         fontFamily: 'JetBrains Mono, monospace', 
-                        fontSize: '15px', 
+                        fontSize: '14px', 
                         fontWeight: 800, 
                         color: '#111827',
                         letterSpacing: '0.3px'
@@ -1057,8 +1189,8 @@ export function App() {
                         style={{
                           fontSize: '10px',
                           fontWeight: 800,
-                          padding: '1px 6px',
-                          borderRadius: '6px',
+                          padding: '1px 5px',
+                          borderRadius: '5px',
                           background: t.country === 'OMN' ? '#fef3c7' : '#dbeafe',
                           color: t.country === 'OMN' ? '#b45309' : '#1d4ed8',
                           border: `1px solid ${t.country === 'OMN' ? '#fde68a' : '#bfdbfe'}`
@@ -1067,27 +1199,31 @@ export function App() {
                         {t.country}
                       </span>
 
-                      {isG2 && (
+                      {/* Admin: show owner name on card */}
+                      {isAdmin && t.owner_name && (
                         <span style={{ 
-                          fontSize: '9px', fontWeight: 800, padding: '1px 5px', borderRadius: '5px',
-                          background: '#d1fae5', color: '#065f46', textTransform: 'uppercase'
+                          fontSize: '9px', fontWeight: 700, padding: '1px 5px', borderRadius: '5px',
+                          background: '#f3f4f6', color: '#4b5563' 
                         }}>
-                          LOADED
+                          👤 {t.owner_name}
                         </span>
                       )}
 
-                      {/* Driver & Worker Owner tag */}
-                      {t.driver && (
+                      {/* Wait time pill */}
+                      {waitText && (
                         <span style={{ 
-                          fontSize: '10px', color: '#4b5563', fontWeight: 600,
-                          background: '#f3f4f6', padding: '1px 6px', borderRadius: '5px' 
+                          fontSize: '9px', fontWeight: 700, padding: '1px 5px', borderRadius: '5px',
+                          background: isG2 ? '#ecfdf5' : '#eff6ff', 
+                          color: isG2 ? '#065f46' : '#1e40af',
+                          display: 'inline-flex', alignItems: 'center', gap: '3px'
                         }}>
-                          {t.driver}
+                          <Clock size={10} />
+                          {waitText}
                         </span>
                       )}
                     </div>
 
-                    {/* Compact Delete button */}
+                    {/* Delete button */}
                     <button
                       onClick={() => handleDeleteTruck(t.id)}
                       style={{
@@ -1105,7 +1241,61 @@ export function App() {
                     </button>
                   </div>
 
-                  {/* Row 2: Gate 1 + Gate 2 (LOADED) + PC input */}
+                  {/* Row 2: Driver Name input + Phone input with Call link */}
+                  <div style={{ display: 'grid', gridTemplateColumns: '1.4fr 1.2fr auto', gap: '5px', marginBottom: '6px', alignItems: 'center' }}>
+                    <input
+                      type="text"
+                      defaultValue={t.driver || ''}
+                      placeholder="Driver name"
+                      onBlur={(e) => handleDriverFieldsBlur(t.id, e.target.value, t.driver_phone || '')}
+                      style={{
+                        padding: '4px 7px',
+                        borderRadius: '7px',
+                        background: '#f9fafb',
+                        border: '1px solid #e5e7eb',
+                        color: '#111827',
+                        fontSize: '11px',
+                        outline: 'none',
+                        boxSizing: 'border-box'
+                      }}
+                    />
+
+                    <input
+                      type="tel"
+                      defaultValue={t.driver_phone || ''}
+                      placeholder="Phone"
+                      onBlur={(e) => handleDriverFieldsBlur(t.id, t.driver || '', e.target.value)}
+                      style={{
+                        padding: '4px 7px',
+                        borderRadius: '7px',
+                        background: '#f9fafb',
+                        border: '1px solid #e5e7eb',
+                        color: '#111827',
+                        fontSize: '11px',
+                        outline: 'none',
+                        boxSizing: 'border-box'
+                      }}
+                    />
+
+                    {t.driver_phone ? (
+                      <a
+                        href={`tel:${t.driver_phone}`}
+                        title={`Call ${t.driver_phone}`}
+                        style={{
+                          height: '24px', width: '26px',
+                          display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
+                          borderRadius: '6px', background: '#ecfdf5', border: '1px solid #a7f3d0',
+                          color: '#059669', textDecoration: 'none'
+                        }}
+                      >
+                        <Phone size={12} />
+                      </a>
+                    ) : (
+                      <span style={{ width: '26px' }} />
+                    )}
+                  </div>
+
+                  {/* Row 3: Gate 1 + Gate 2 (LOADED) + PC input */}
                   <div style={{ display: 'grid', gridTemplateColumns: '1fr 1.3fr 54px', gap: '5px', alignItems: 'center' }}>
                     {/* Gate 1 Button */}
                     <button
@@ -1113,8 +1303,8 @@ export function App() {
                       onClick={() => toggleGate1(t)}
                       style={{
                         height: '34px',
-                        padding: '0 6px',
-                        borderRadius: '9px',
+                        padding: '0 4px',
+                        borderRadius: '8px',
                         border: '1px solid',
                         borderColor: isG1 ? '#2563eb' : '#e5e7eb',
                         background: isG1 ? '#2563eb' : '#f9fafb',
@@ -1124,13 +1314,13 @@ export function App() {
                         display: 'flex',
                         alignItems: 'center',
                         justifyContent: 'center',
-                        gap: '4px',
+                        gap: '3px',
                         cursor: 'pointer',
                         transition: 'all 0.12s ease'
                       }}
                     >
                       {isG1 && <Check size={12} strokeWidth={3} />}
-                      <span>Gate 1</span>
+                      <span>{isG1 ? `Gate 1 · ${g1Time}` : 'Gate 1'}</span>
                       {isG1 && t.gate1_by && (
                         <span style={{ fontSize: '8px', opacity: 0.85, fontWeight: 600 }}>
                           ({t.gate1_by})
@@ -1145,11 +1335,11 @@ export function App() {
                       disabled={!isG1}
                       style={{
                         height: '34px',
-                        padding: '0 6px',
-                        borderRadius: '9px',
+                        padding: '0 4px',
+                        borderRadius: '8px',
                         border: '1px solid',
                         borderColor: isG2 ? '#059669' : !isG1 ? '#edf0f4' : '#e5e7eb',
-                        background: isG2 ? '#059669' : !isG1 ? '#f9fafb' : '#f9fafb',
+                        background: isG2 ? '#059669' : '#f9fafb',
                         color: isG2 ? '#ffffff' : !isG1 ? '#9ca3af' : '#111827',
                         opacity: !isG1 ? 0.5 : 1,
                         fontWeight: 700,
@@ -1157,7 +1347,7 @@ export function App() {
                         display: 'flex',
                         alignItems: 'center',
                         justifyContent: 'center',
-                        gap: '4px',
+                        gap: '3px',
                         cursor: !isG1 ? 'not-allowed' : 'pointer',
                         transition: 'all 0.12s ease'
                       }}
@@ -1167,7 +1357,7 @@ export function App() {
                       ) : isG2 ? (
                         <Check size={12} strokeWidth={3} />
                       ) : null}
-                      <span>G2 · {isG2 ? 'LOADED' : 'Load'}</span>
+                      <span>{isG2 ? `G2 · ${g2Time}` : 'G2 · Load'}</span>
                       {isG2 && t.gate2_by && (
                         <span style={{ fontSize: '8px', opacity: 0.85, fontWeight: 600 }}>
                           ({t.gate2_by})
@@ -1180,13 +1370,13 @@ export function App() {
                       type="number"
                       inputMode="numeric"
                       placeholder="PC"
-                      value={t.pcs ?? ''}
-                      onChange={(e) => handlePcsChange(t, e.target.value)}
+                      defaultValue={t.pcs ?? ''}
+                      onBlur={(e) => handlePcsBlur(t, e.target.value)}
                       style={{
                         height: '34px',
                         width: '100%',
                         padding: '0 4px',
-                        borderRadius: '9px',
+                        borderRadius: '8px',
                         background: '#f9fafb',
                         border: '1px solid #e5e7eb',
                         color: '#111827',
@@ -1206,7 +1396,46 @@ export function App() {
         )}
       </main>
 
-      {/* 3. FIXED BOTTOM BAR (Copy Report: My Report vs All Report) */}
+      {/* Undo Toast (Feature 2: positioned above bottom bar) */}
+      {undoState && (
+        <div style={{
+          position: 'absolute',
+          bottom: '72px',
+          left: '50%',
+          transform: 'translateX(-50%)',
+          background: '#111827',
+          color: '#ffffff',
+          padding: '8px 12px',
+          borderRadius: '11px',
+          fontSize: '11px',
+          fontWeight: 700,
+          zIndex: 80,
+          display: 'flex',
+          alignItems: 'center',
+          gap: '10px',
+          boxShadow: '0 4px 14px rgba(0,0,0,0.25)',
+          whiteSpace: 'nowrap'
+        }}>
+          <span>{undoState.actionText}</span>
+          <button
+            onClick={handleUndo}
+            style={{
+              background: '#ffffff',
+              color: '#111827',
+              border: 'none',
+              borderRadius: '7px',
+              padding: '3px 8px',
+              fontSize: '11px',
+              fontWeight: 800,
+              cursor: 'pointer'
+            }}
+          >
+            Undo
+          </button>
+        </div>
+      )}
+
+      {/* 3. FIXED BOTTOM BAR (Copy Day Report) */}
       <footer
         style={{
           position: 'absolute',
@@ -1214,21 +1443,20 @@ export function App() {
           left: 0,
           right: 0,
           padding: '10px 14px calc(10px + var(--safe-bottom))',
-          background: 'linear-gradient(to top, #ffffff 75%, rgba(255, 255, 255, 0))',
+          background: 'linear-gradient(to top, #ffffff 80%, rgba(255, 255, 255, 0))',
           display: 'flex',
           justifyContent: 'center',
-          gap: '8px',
           pointerEvents: 'none',
           zIndex: 40
         }}
       >
         <button
-          onClick={() => copyDayReport(tab === 'my')}
+          onClick={copyDayReport}
           style={{
-            flex: 2,
-            maxWidth: '320px',
+            width: '100%',
+            maxWidth: '380px',
             padding: '13px',
-            borderRadius: '14px',
+            borderRadius: '13px',
             border: 'none',
             background: '#111827',
             color: '#ffffff',
@@ -1244,60 +1472,8 @@ export function App() {
           }}
         >
           <Copy size={15} />
-          {tab === 'my' 
-            ? `Copy My Report (${sMyLoaded})` 
-            : `Copy Report (${sLoaded} Loaded)`}
+          <span>Copy Day Report ({sLoaded} Loaded)</span>
         </button>
-
-        {tab === 'my' ? (
-          <button
-            onClick={() => copyDayReport(false)}
-            title="Copy all site loaded trucks"
-            style={{
-              flex: 1,
-              maxWidth: '120px',
-              padding: '13px 8px',
-              borderRadius: '14px',
-              border: '1px solid #e5e7eb',
-              background: '#ffffff',
-              color: '#111827',
-              fontSize: '12px',
-              fontWeight: 700,
-              cursor: 'pointer',
-              display: 'flex',
-              alignItems: 'center',
-              justifyContent: 'center',
-              gap: '4px',
-              pointerEvents: 'auto'
-            }}
-          >
-            All ({sLoaded})
-          </button>
-        ) : (
-          <button
-            onClick={() => copyDayReport(true)}
-            title="Copy only my loaded trucks"
-            style={{
-              flex: 1,
-              maxWidth: '120px',
-              padding: '13px 8px',
-              borderRadius: '14px',
-              border: '1px solid #e5e7eb',
-              background: '#ffffff',
-              color: '#111827',
-              fontSize: '12px',
-              fontWeight: 700,
-              cursor: 'pointer',
-              display: 'flex',
-              alignItems: 'center',
-              justifyContent: 'center',
-              gap: '4px',
-              pointerEvents: 'auto'
-            }}
-          >
-            Mine ({sMyLoaded})
-          </button>
-        )}
       </footer>
 
       {/* Toast Notification */}
@@ -1305,14 +1481,14 @@ export function App() {
         <div
           style={{
             position: 'absolute',
-            top: '14px',
+            top: '12px',
             left: '50%',
             transform: 'translateX(-50%)',
             background: '#111827',
             color: '#ffffff',
-            padding: '8px 14px',
-            borderRadius: '10px',
-            fontSize: '12px',
+            padding: '7px 12px',
+            borderRadius: '9px',
+            fontSize: '11px',
             fontWeight: 700,
             zIndex: 999,
             boxShadow: '0 4px 14px rgba(0,0,0,0.2)',
@@ -1323,53 +1499,54 @@ export function App() {
         </div>
       )}
 
-      {/* Upload/Paste Modal */}
-      {showUploadModal && (
+      {/* Paste Modal */}
+      {showPasteModal && (
         <div style={{
           position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.5)',
           display: 'flex', alignItems: 'center', justifyContent: 'center',
           padding: '16px', zIndex: 100
         }}>
           <div style={{
-            background: '#ffffff', borderRadius: '18px', padding: '18px',
+            background: '#ffffff', borderRadius: '16px', padding: '16px',
             width: '100%', maxWidth: '380px', border: '1px solid #e5e7eb',
             boxShadow: '0 10px 25px rgba(0,0,0,0.1)'
           }}>
-            <h3 style={{ fontSize: '15px', fontWeight: 800, marginBottom: '6px' }}>Paste Truck List</h3>
-            <p style={{ fontSize: '11px', color: '#6b7280', marginBottom: '10px' }}>
-              Format: <code style={{ background: '#f3f4f6', padding: '2px 4px', borderRadius: '4px' }}>3187YB OMN</code> or <code style={{ background: '#f3f4f6', padding: '2px 4px', borderRadius: '4px' }}>39263 DXB</code>
+            <h3 style={{ fontSize: '14px', fontWeight: 800, marginBottom: '4px' }}>Paste Trucks</h3>
+            <p style={{ fontSize: '11px', color: '#6b7280', marginBottom: '8px' }}>
+              Format: <code>PLATE COUNTRY DRIVER PHONE</code><br />
+              Example: <code>3187YB OMN Ahmed Ali 96891234567</code><br />
+              (Also supports Excel copy-paste with tabs)
             </p>
             <textarea
-              rows={5}
-              placeholder="Paste truck list lines here…"
-              value={uploadText}
-              onChange={(e) => setUploadText(e.target.value)}
+              rows={6}
+              placeholder="3187YB OMN Ahmed Ali 96891234567&#10;39263 DXB Rashid 0501234567"
+              value={pasteText}
+              onChange={(e) => setPasteText(e.target.value)}
               style={{
-                width: '100%', padding: '10px', borderRadius: '10px',
+                width: '100%', padding: '9px', borderRadius: '9px',
                 background: '#f9fafb', border: '1px solid #e5e7eb',
-                color: '#111827', fontFamily: 'JetBrains Mono', fontSize: '12px',
-                outline: 'none', marginBottom: '12px', boxSizing: 'border-box'
+                color: '#111827', fontFamily: 'JetBrains Mono', fontSize: '11px',
+                outline: 'none', marginBottom: '10px', boxSizing: 'border-box'
               }}
+              autoFocus
             />
             <div style={{ display: 'flex', gap: '6px' }}>
               <button
-                onClick={() => {
-                  parseAndAddRows(uploadText);
-                  setUploadText('');
-                  setShowUploadModal(false);
-                }}
+                onClick={handlePasteSubmit}
+                disabled={isPasting}
                 style={{
-                  flex: 1, padding: '10px', borderRadius: '10px',
+                  flex: 1, padding: '9px', borderRadius: '9px',
                   background: '#111827', color: '#ffffff',
-                  border: 'none', fontWeight: 700, fontSize: '12px', cursor: 'pointer'
+                  border: 'none', fontWeight: 700, fontSize: '12px', cursor: 'pointer',
+                  opacity: isPasting ? 0.7 : 1
                 }}
               >
-                Add Trucks ({currentWorker})
+                {isPasting ? 'Saving to Database…' : 'Add to Database'}
               </button>
               <button
-                onClick={() => setShowUploadModal(false)}
+                onClick={() => setShowPasteModal(false)}
                 style={{
-                  padding: '10px 14px', borderRadius: '10px',
+                  padding: '9px 12px', borderRadius: '9px',
                   background: '#f3f4f6', color: '#374151',
                   border: '1px solid #e5e7eb', fontWeight: 600, fontSize: '12px', cursor: 'pointer'
                 }}
